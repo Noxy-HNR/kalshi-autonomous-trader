@@ -55,3 +55,7 @@ desktop.ini
 
 # local database password written by setup
 .db_password
+
+# dashboard build output
+apps/dashboard/.next/
+apps/dashboard/node_modules/
