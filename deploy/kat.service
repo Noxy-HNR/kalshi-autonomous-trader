@@ -1,0 +1,31 @@
+[Unit]
+Description=Kalshi Autonomous Trader
+Documentation=https://github.com/Noxy-HNR/kalshi-autonomous-trader
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kat
+WorkingDirectory=C:\AI\kalshi-autonomous-trader
+Environment=PYTHONUNBUFFERED=1
+# Secrets live outside the repository; this file is read by systemd, not by git.
+EnvironmentFile=-/etc/kat/kat.env
+ExecStart=C:\AI\kalshi-autonomous-trader/.venv/bin/python -m kat.engine.entrypoint
+Restart=always
+RestartSec=10
+# Long enough for the graceful shutdown path to drain the write queue and record
+# a clean-shutdown marker. Killing it sooner makes the next start treat this as
+# a crash and demand a full reconciliation before trading.
+TimeoutStopSec=45
+KillSignal=SIGTERM
+
+# The platform needs no elevated privileges at runtime.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=C:\AI\kalshi-autonomous-trader/logs C:\AI\kalshi-autonomous-trader/data
+
+[Install]
+WantedBy=multi-user.target
