@@ -61,9 +61,7 @@ def include_object(
         # TimescaleDB creates its own chunk indexes under an internal schema.
         if name.startswith("_hyper_") or name.startswith("_timescaledb"):
             return False
-    if type_ == "table" and name and name.startswith("_timescaledb"):
-        return False
-    return True
+    return not (type_ == "table" and name and name.startswith("_timescaledb"))
 
 
 def run_migrations_offline() -> None:
