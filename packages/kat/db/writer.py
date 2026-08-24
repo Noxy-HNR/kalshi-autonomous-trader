@@ -169,11 +169,19 @@ class AsyncWriter:
             return
         try:
             async with self._db.session() as session:
-                # ``merge`` rather than ``add``: reconciliation and websocket
-                # updates both re-send rows we already hold, and an upsert is the
-                # correct semantic for an idempotent replay.
                 for item in batch:
-                    await session.merge(item.obj)
+                    if _has_primary_key(item.obj):
+                        # Rows with a natural key (order_id, fill_id, ticker) are
+                        # merged: reconciliation and websocket replays re-send
+                        # rows we already hold, and an upsert is the correct
+                        # semantic for an idempotent replay.
+                        await session.merge(item.obj)
+                    else:
+                        # Append-only rows with a surrogate key have nothing to
+                        # merge against. `add` avoids the SELECT that `merge`
+                        # would issue per row, which matters when this is the
+                        # highest-volume write path in the system.
+                        session.add(item.obj)
             self._written += len(batch)
             self._retry_attempts = 0
             metrics.increment(M_DB_WRITES, len(batch))
@@ -224,6 +232,18 @@ class AsyncWriter:
             "running": self._running,
             "retrying": bool(self._retry_batch),
         }
+
+
+def _has_primary_key(obj: Base) -> bool:
+    """Whether every primary-key column on this row already carries a value.
+
+    Autoincrement surrogate keys are ``None`` until the database assigns them,
+    which is precisely the case that must be inserted rather than merged.
+    """
+    return all(
+        getattr(obj, column.name, None) is not None
+        for column in obj.__table__.primary_key.columns
+    )
 
 
 def _safe_dict(obj: Base) -> dict[str, Any]:

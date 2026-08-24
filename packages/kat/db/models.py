@@ -38,7 +38,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON
 
-from kat.db.base import Base, IngestMixin, TimestampMixin, utcnow
+from kat.db.base import Base, IngestMixin, TimestampMixin, bigint_pk, utcnow
 
 # JSONB on PostgreSQL, plain JSON on SQLite -- the same Python dict either way.
 JSONType = JSON().with_variant(JSONB(), "postgresql")
@@ -127,7 +127,7 @@ class MarketLifecycleEvent(Base):
 
     __tablename__ = "market_lifecycle_events"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = bigint_pk()
     ticker: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     market_type: Mapped[str] = mapped_column(String(8), nullable=False)
     change: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -151,7 +151,7 @@ class Quote(Base, IngestMixin):
 
     __tablename__ = "quotes"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = bigint_pk()
     ticker: Mapped[str] = mapped_column(String(128), nullable=False)
     market_type: Mapped[str] = mapped_column(String(8), nullable=False)
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -177,7 +177,7 @@ class OrderbookSnapshot(Base, IngestMixin):
 
     __tablename__ = "orderbook_snapshots"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = bigint_pk()
     ticker: Mapped[str] = mapped_column(String(128), nullable=False)
     market_type: Mapped[str] = mapped_column(String(8), nullable=False)
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -194,7 +194,7 @@ class TradePrint(Base, IngestMixin):
 
     __tablename__ = "trade_prints"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = bigint_pk()
     trade_id: Mapped[str | None] = mapped_column(String(64), index=True)
     ticker: Mapped[str] = mapped_column(String(128), nullable=False)
     market_type: Mapped[str] = mapped_column(String(8), nullable=False)
@@ -211,7 +211,7 @@ class Candle(Base, IngestMixin):
 
     __tablename__ = "candles"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = bigint_pk()
     ticker: Mapped[str] = mapped_column(String(128), nullable=False)
     market_type: Mapped[str] = mapped_column(String(8), nullable=False)
     period_s: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -240,7 +240,7 @@ class FundingRate(Base, IngestMixin):
 
     __tablename__ = "funding_rates"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = bigint_pk()
     ticker: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     rate: Mapped[float | None] = mapped_column(Float)
@@ -440,7 +440,7 @@ class BalanceSnapshot(Base):
 
     __tablename__ = "balance_snapshots"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = bigint_pk()
     ts: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow, index=True
     )
@@ -468,7 +468,7 @@ class Settlement(Base):
 
     __tablename__ = "settlements"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = bigint_pk()
     ticker: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     settled_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     result: Mapped[str | None] = mapped_column(String(32))
@@ -532,7 +532,7 @@ class StrategyStateChange(Base):
 
     __tablename__ = "strategy_state_changes"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = bigint_pk()
     strategy_id: Mapped[str] = mapped_column(String(96), nullable=False, index=True)
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
     from_state: Mapped[str | None] = mapped_column(String(24))
@@ -547,7 +547,7 @@ class Signal(Base):
 
     __tablename__ = "signals"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = bigint_pk()
     signal_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     ts: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow, index=True
@@ -622,7 +622,7 @@ class Prediction(Base):
 
     __tablename__ = "predictions"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = bigint_pk()
     prediction_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     ts: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow, index=True
@@ -708,7 +708,7 @@ class NewsArticle(Base, IngestMixin):
 
     __tablename__ = "news_articles"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = bigint_pk()
     article_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     url: Mapped[str | None] = mapped_column(Text)
@@ -728,7 +728,7 @@ class NewsMarketLink(Base):
 
     __tablename__ = "news_market_links"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = bigint_pk()
     article_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     ticker: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     market_type: Mapped[str] = mapped_column(String(8), nullable=False)
@@ -782,7 +782,7 @@ class ArbitrageOpportunity(Base):
 
     __tablename__ = "arbitrage_opportunities"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = bigint_pk()
     opportunity_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     ts: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow, index=True
@@ -809,7 +809,7 @@ class RegimeObservation(Base):
 
     __tablename__ = "regime_observations"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = bigint_pk()
     ts: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow, index=True
     )
@@ -831,7 +831,7 @@ class AuditLog(Base):
 
     __tablename__ = "audit_log"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = bigint_pk()
     ts: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow, index=True
     )
@@ -849,7 +849,7 @@ class RiskEvent(Base):
 
     __tablename__ = "risk_events"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = bigint_pk()
     ts: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow, index=True
     )
@@ -890,7 +890,7 @@ class HealthEvent(Base):
 
     __tablename__ = "health_events"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = bigint_pk()
     ts: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow, index=True
     )
@@ -905,7 +905,7 @@ class ApiEvent(Base):
 
     __tablename__ = "api_events"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = bigint_pk()
     ts: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow, index=True
     )
@@ -924,7 +924,7 @@ class ErrorEvent(Base):
 
     __tablename__ = "error_events"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = bigint_pk()
     ts: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow, index=True
     )
@@ -955,7 +955,7 @@ class StrategyPerformance(Base):
 
     __tablename__ = "strategy_performance"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = bigint_pk()
     ts: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow, index=True
     )
@@ -984,7 +984,7 @@ class ExternalSeries(Base, IngestMixin):
 
     __tablename__ = "external_series"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = bigint_pk()
     provider: Mapped[str] = mapped_column(String(48), nullable=False, index=True)
     series_key: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

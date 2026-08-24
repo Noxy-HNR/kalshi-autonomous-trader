@@ -22,7 +22,31 @@ from typing import Any
 from sqlalchemy import BigInteger, DateTime, Integer, MetaData, String, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-__all__ = ["Base", "IngestMixin", "TimestampMixin", "money", "price_cc", "qty_qc", "utcnow"]
+__all__ = [
+    "Base",
+    "IngestMixin",
+    "TimestampMixin",
+    "bigint_pk",
+    "money",
+    "price_cc",
+    "qty_qc",
+    "utcnow",
+]
+
+#: Auto-incrementing surrogate primary key for append-only tables.
+#:
+#: SQLite only auto-increments a column declared exactly ``INTEGER PRIMARY KEY``
+#: -- that spelling is what aliases the internal ROWID. A ``BIGINT PRIMARY KEY``
+#: is an ordinary column there, so every insert would fail a NOT NULL constraint.
+#: PostgreSQL has no such restriction and wants the 64-bit width for tables that
+#: accumulate market data indefinitely, so the type varies by dialect while the
+#: Python-side value stays a plain int.
+BigIntPK = BigInteger().with_variant(Integer, "sqlite")
+
+
+def bigint_pk(**kw: Any) -> Mapped[int]:
+    """An auto-incrementing surrogate primary key that works on both dialects."""
+    return mapped_column(BigIntPK, primary_key=True, autoincrement=True, **kw)
 
 # Explicit constraint naming so Alembic can autogenerate reversible migrations.
 NAMING_CONVENTION = {
