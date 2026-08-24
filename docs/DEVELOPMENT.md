@@ -80,9 +80,15 @@ npm --prefix apps/dashboard run dev
 npm --prefix apps/dashboard run typecheck
 ```
 
-The dev server proxies `/api/*` to the engine at `KAT_API_URL`, default
-`http://127.0.0.1:8000`, so the engine's origin is never baked into the client
-bundle.
+The dev server proxies `/api/*` to the engine, so the engine's origin is never
+baked into the client bundle. The destination is built from the **same**
+variables the engine itself reads -- `KAT_API_HOST` and `KAT_API_PORT` -- so a
+changed port takes effect on both sides from one setting. `KAT_API_URL`
+overrides it outright, for the case where the engine genuinely runs elsewhere.
+
+Note that `rewrites()` is evaluated when the Next.js server starts, not at build
+time, so the variables must be present in the environment that runs
+`next start` (or `next dev`), not only the one that ran `next build`.
 
 ---
 
