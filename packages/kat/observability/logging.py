@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import copy
 import logging
 import logging.handlers
 import queue
@@ -99,6 +100,27 @@ def _rename_event(_logger: Any, _name: str, event_dict: dict[str, Any]) -> dict[
     return event_dict
 
 
+class _EventDictQueueHandler(logging.handlers.QueueHandler):
+    """A queue handler that preserves structlog's event dictionary.
+
+    The default :meth:`QueueHandler.prepare` calls ``self.format(record)`` and
+    replaces ``record.msg`` with the resulting *string*, so that the record is
+    guaranteed picklable across a process boundary. That is exactly wrong here:
+    the file handler on the other end of the queue is a structlog
+    ``ProcessorFormatter``, which expects ``record.msg`` to still be the event
+    dictionary and raises ``AttributeError: 'str' object has no attribute
+    'copy'`` when handed a string.
+
+    Our queue is consumed by a thread in the same process, so nothing needs to
+    be picklable. We take a shallow copy -- because the console handler will
+    render (and mutate) the original moments later -- and pass the record on
+    with its event dictionary intact.
+    """
+
+    def prepare(self, record: logging.LogRecord) -> logging.LogRecord:
+        return copy.copy(record)
+
+
 def configure_logging(
     level: str = "INFO",
     *,
@@ -161,7 +183,6 @@ def configure_logging(
             foreign_pre_chain=shared_processors,
         )
     )
-    root.addHandler(console)
 
     if log_dir is not None:
         directory = Path(log_dir)
@@ -181,13 +202,17 @@ def configure_logging(
         # Hand file I/O to a background thread so a stalled disk cannot block
         # an order submission that happens to log on its way out.
         log_queue: queue.Queue[Any] = queue.Queue(maxsize=50_000)
-        queue_handler = logging.handlers.QueueHandler(log_queue)
-        root.addHandler(queue_handler)
+        # Registered BEFORE the console handler: handlers run in order, and the
+        # console formatter replaces ``record.msg`` with its rendered string.
+        # The queue must take its copy of the event dict first.
+        root.addHandler(_EventDictQueueHandler(log_queue))
         _listener = logging.handlers.QueueListener(
             log_queue, file_handler, respect_handler_level=True
         )
         _listener.start()
         atexit.register(shutdown_logging)
+
+    root.addHandler(console)
 
     # Third-party loggers are noisy at INFO and tell us nothing we act on.
     for noisy in ("httpx", "httpcore", "websockets", "asyncio", "urllib3", "sqlalchemy.engine"):

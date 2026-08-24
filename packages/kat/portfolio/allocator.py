@@ -307,7 +307,7 @@ class CapitalAllocator:
         if cap < policy.min_allocation_micros:
             cap = deployable
 
-        for score, weight in ranked:
+        for score, _weight in ranked:
             if remaining < policy.min_allocation_micros:
                 allocations.append(
                     StrategyAllocation(

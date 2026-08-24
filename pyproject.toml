@@ -59,12 +59,17 @@ torch = ["torch>=2.5"]
 kat-trader = "kat.engine.entrypoint:main"
 kat-api = "apps.api.main:main"
 
-[tool.setuptools]
-package-dir = { "" = "packages" }
-
+# The trading package lives under packages/ and the runnable services under
+# apps/. Both are installed so the entry points work from any directory rather
+# than only from the repository root.
 [tool.setuptools.packages.find]
-where = ["packages"]
-include = ["kat*"]
+where = ["packages", "."]
+include = ["kat*", "apps*"]
+exclude = ["tests*", "apps.dashboard*"]
+
+[tool.setuptools.package-dir]
+"" = "packages"
+"apps" = "apps"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
