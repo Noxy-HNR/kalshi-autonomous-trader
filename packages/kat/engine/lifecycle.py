@@ -155,7 +155,7 @@ class ServiceComponent:
                 return  # a component that returns cleanly is finished
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:  # noqa: BLE001 - supervision must catch everything
+            except Exception as exc:
                 self.status.healthy = False
                 self.status.consecutive_failures += 1
                 self.status.detail = f"{type(exc).__name__}: {exc}"
@@ -191,7 +191,7 @@ class ServiceComponent:
             try:
                 result = self._health()
                 ok = await result if asyncio.iscoroutine(result) else bool(result)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 ok = False
                 self.status.detail = f"health probe failed: {exc}"
         self.status.healthy = ok
@@ -311,7 +311,7 @@ class Application:
                 await self._load_persisted_state()
                 await self._start_components()
                 await self._run_health_checks()
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 self.phase = Phase.FAILED
                 self.report.phase = Phase.FAILED
                 self.report.blocking_reasons.append(f"{type(exc).__name__}: {exc}")
@@ -361,7 +361,7 @@ class Application:
         try:
             await self.database.connect()
             self.report.database_ready = True
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             # A platform without a database can still observe markets, but it
             # cannot audit, cannot persist state and cannot be trusted to
             # reconcile after a restart. That is not a trading state.
@@ -401,7 +401,7 @@ class Application:
                 await session.merge(
                     SystemState(key=_SHUTDOWN_MARKER, value={"clean": False}, updated_by="startup")
                 )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.warning("app.shutdown_marker_unreadable", error=str(exc))
             return
 
@@ -424,7 +424,7 @@ class Application:
             try:
                 await component.start()
                 log.info("component.started", component=component.name)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 component.status.healthy = False
                 component.status.detail = str(exc)
                 message = f"component {component.name} failed to start: {exc}"
@@ -510,7 +510,7 @@ class Application:
                 metrics.gauge("app.uptime_s", (self.clock.now_ms() - self._started_ms) / 1000)
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 log.error("app.health_loop_error", error=str(exc), exc_info=True)
 
     def _record_health(self, component: ServiceComponent) -> None:
@@ -550,7 +550,7 @@ class Application:
             try:
                 await component.stop()
                 log.info("component.stopped", component=component.name)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 log.error("component.stop_failed", component=component.name, error=str(exc))
 
         if clean and self.report.database_ready:

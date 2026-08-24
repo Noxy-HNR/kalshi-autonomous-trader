@@ -62,6 +62,7 @@ decimal form. No money value is ever produced by this module.
 from __future__ import annotations
 
 import bisect
+import itertools
 import math
 import statistics
 from collections.abc import Callable, Iterable, Sequence
@@ -74,8 +75,6 @@ from kat.common.fixedpoint import CC_PER_DOLLAR, QC_PER_CONTRACT
 from kat.features.spec import (
     LAG_BOOK_MS,
     LAG_CANDLE_MS,
-    LAG_CLOCK_MS,
-    LAG_FUNDING_MS,
     LAG_TICKER_MS,
     FeatureFamily,
     FeatureSetSpec,
@@ -268,7 +267,7 @@ class BarSeries:
         if period_ms <= 0:
             raise DataQualityError(f"bar period must be positive, got {period_ms}")
         ordered = sorted(bars, key=lambda b: b.ts_ms)
-        for prev, nxt in zip(ordered, ordered[1:], strict=False):
+        for prev, nxt in itertools.pairwise(ordered):
             if prev.ts_ms == nxt.ts_ms:
                 raise DataQualityError(f"duplicate bar at ts={prev.ts_ms}")
         self.period_ms = period_ms
@@ -558,7 +557,7 @@ class _Calc:
             window = self.bar_window(span_ms)
             period = series.period_ms if series is not None else 0
             changes: list[int] = []
-            for prev, nxt in zip(window, window[1:], strict=False):
+            for prev, nxt in itertools.pairwise(window):
                 if nxt.ts_ms - prev.ts_ms == period:
                     changes.append(nxt.close_cc - prev.close_cc)
             self._cache[key] = changes
@@ -629,17 +628,17 @@ def _f_microprice_offset_cc(c: _Calc) -> tuple[float, int] | None:
     likely to be a buy, and the microprice says so.
     """
     book = c.book
-    if not c.two_sided:
+    if book is None:
         return None
-    assert book is not None
-    bid, ask = book.best_bid_cc, book.best_ask_cc
-    assert bid is not None and ask is not None
+    bid, ask, mid = book.best_bid_cc, book.best_ask_cc, book.mid_cc
+    if bid is None or ask is None or mid is None:
+        return None
     bid_sz, ask_sz = book.best_bid_size_qc, book.best_ask_size_qc
     total = bid_sz + ask_sz
     if total <= 0:
         return None
     micro = (bid * ask_sz + ask * bid_sz) / total
-    return micro - book.mid_cc, c.book_ts_ms  # type: ignore[operator]
+    return micro - mid, c.book_ts_ms
 
 
 def _f_book_imbalance(c: _Calc) -> tuple[float, int] | None:
@@ -656,9 +655,8 @@ def _f_book_imbalance(c: _Calc) -> tuple[float, int] | None:
 
 def _f_book_pressure_l1(c: _Calc) -> tuple[float, int] | None:
     book = c.book
-    if not c.two_sided:
+    if book is None or not c.two_sided:
         return None
-    assert book is not None
     bid, ask = book.best_bid_size_qc, book.best_ask_size_qc
     total = bid + ask
     if total <= 0:
@@ -674,9 +672,8 @@ def _f_effective_spread_cc(c: _Calc) -> tuple[float, int] | None:
     than reported as missing, because a thin book is expensive, not unknown.
     """
     book = c.book
-    if not c.two_sided:
+    if book is None or not c.two_sided:
         return None
-    assert book is not None
     buy_qty = min(REFERENCE_SIZE_QC, book.total_depth_qc(is_bid=False))
     sell_qty = min(REFERENCE_SIZE_QC, book.total_depth_qc(is_bid=True))
     if buy_qty <= 0 or sell_qty <= 0:
@@ -848,7 +845,8 @@ def _f_range_vol_15m_cc(c: _Calc) -> tuple[float, int] | None:
     window = [b for b in c.bar_window(_W_15M) if b.high_cc is not None and b.low_cc is not None]
     if len(window) < _MIN_DISPERSION_POINTS:
         return None
-    mean_sq = statistics.fmean((b.high_cc - b.low_cc) ** 2 for b in window)  # type: ignore[operator]
+    ranges = [(b.high_cc or 0) - (b.low_cc or 0) for b in window]
+    mean_sq = statistics.fmean(r * r for r in ranges)
     return math.sqrt(mean_sq / (4.0 * math.log(2.0))), window[-1].ts_ms
 
 
@@ -918,14 +916,15 @@ def _f_trade_imbalance_5m(c: _Calc) -> tuple[float, int] | None:
     return signed / total, window[-1].ts_ms
 
 
-def _oi_pair(c: _Calc) -> tuple[Bar, Bar] | None:
+def _oi_pair(c: _Calc) -> tuple[int, int, int] | None:
+    """``(latest_oi_qc, prior_oi_qc, info_ts_ms)`` five minutes apart, or ``None``."""
     latest = c.latest_bar
     if latest is None or latest.open_interest_qc is None:
         return None
     prior = c.bar_at_or_before(latest.ts_ms - _W_5M)
     if prior is None or prior.open_interest_qc is None or prior.ts_ms == latest.ts_ms:
         return None
-    return latest, prior
+    return latest.open_interest_qc, prior.open_interest_qc, latest.ts_ms
 
 
 def _f_oi_change_5m_qc(c: _Calc) -> tuple[float, int] | None:
@@ -938,20 +937,18 @@ def _f_oi_change_5m_qc(c: _Calc) -> tuple[float, int] | None:
     pair = _oi_pair(c)
     if pair is None:
         return None
-    latest, prior = pair
-    assert latest.open_interest_qc is not None and prior.open_interest_qc is not None
-    return float(latest.open_interest_qc - prior.open_interest_qc), latest.ts_ms
+    latest_oi, prior_oi, info_ts = pair
+    return float(latest_oi - prior_oi), info_ts
 
 
 def _f_oi_change_rate_5m(c: _Calc) -> tuple[float, int] | None:
     pair = _oi_pair(c)
     if pair is None:
         return None
-    latest, prior = pair
-    assert latest.open_interest_qc is not None and prior.open_interest_qc is not None
-    if prior.open_interest_qc <= 0:
+    latest_oi, prior_oi, info_ts = pair
+    if prior_oi <= 0:
         return None
-    return (latest.open_interest_qc - prior.open_interest_qc) / prior.open_interest_qc, latest.ts_ms
+    return (latest_oi - prior_oi) / prior_oi, info_ts
 
 
 # ---------------------------------------------------------------------------
@@ -1699,21 +1696,24 @@ class FeatureComputer:
             for spec, impl in zip(self._specs, self._impls, strict=True):
                 result = impl(calc)
                 if result is None:
-                    if spec.required:
+                    fill = spec.fill_value
+                    if fill is None:
                         raise DataQualityError(
                             f"required feature {spec.name!r} could not be computed for "
                             f"{inputs.ticker} at {as_of_ms}"
                         )
-                    assert spec.fill_value is not None
                     values[spec.name] = FeatureValue(
                         name=spec.name,
-                        value=spec.fill_value,
-                        # An imputed value depends on no observation, so it is
-                        # attributed to the decision time itself. Attributing it
-                        # to a stale timestamp would make a constant look like
-                        # old data and could fail an availability check that has
-                        # nothing to check.
-                        info_ts_ms=as_of_ms,
+                        value=fill,
+                        # A fill value is a constant: it came from no observation
+                        # and was therefore knowable arbitrarily early, which is
+                        # what an information time of zero says. Stamping it with
+                        # the decision time instead would be safe for the leakage
+                        # check but would push ``max_info_ts_ms`` -- what gets
+                        # written to ``predictions.feature_ts`` -- up to "now" on
+                        # every row that imputed anything, destroying the record
+                        # of how fresh the real inputs were.
+                        info_ts_ms=0,
                         availability_lag_ms=0,
                         imputed=True,
                     )
@@ -1754,14 +1754,3 @@ class FeatureComputer:
         strict: bool = True,
     ) -> list[FeatureVector]:
         return [self.compute(i, as_of_ms=as_of_ms, strict=strict) for i in inputs]
-
-
-# Referenced in the module docstring's contract with the strategy layer; kept
-# here so a reader can see at a glance which lags the catalogue actually uses.
-_LAGS_IN_USE: Final[tuple[int, ...]] = (
-    LAG_BOOK_MS,
-    LAG_CANDLE_MS,
-    LAG_TICKER_MS,
-    LAG_FUNDING_MS,
-    LAG_CLOCK_MS,
-)

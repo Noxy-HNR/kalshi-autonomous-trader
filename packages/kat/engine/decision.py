@@ -52,7 +52,7 @@ def git_commit() -> str | None:
     ``.git``.
     """
     try:
-        result = subprocess.run(  # noqa: S603 - fixed argv, no shell, no user input
+        result = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
             capture_output=True,
             text=True,

@@ -22,7 +22,7 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import func, select
 
-from kat.config.settings import DatabaseSettings  # noqa: F401 - used by the PostgreSQL fixture
+from kat.config.settings import DatabaseSettings
 from kat.db.base import Base
 from kat.db.engine import Database
 from kat.db.models import (
@@ -188,7 +188,7 @@ class TestWriter:
         be a misconfiguration, but the eviction policy still needs exercising.
         """
         writer = AsyncWriter(sqlite_db)
-        writer._max_size = 10  # noqa: SLF001 - deliberately exercising the bound
+        writer._max_size = 10
 
         for i in range(10):
             writer.enqueue(
