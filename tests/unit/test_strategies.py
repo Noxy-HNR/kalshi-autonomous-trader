@@ -62,15 +62,15 @@ def event_snapshot(bid_cc: int = 4000, ask_cc: int = 4100, **kw) -> MarketSnapsh
 
 
 def perp_snapshot(**kw) -> MarketSnapshot:
-    defaults = dict(
-        ticker="PERP",
-        market_type=MarketType.PERP,
-        book=OrderBook.from_two_sided_levels("PERP", [(4990, DEEP)], [(5010, DEEP)]),
-        updated_ms=NOW,
-        mark_price_cc=5000,
-        volume_qc=DEEP,
-        status="active",
-    )
+    defaults = {
+        "ticker": "PERP",
+        "market_type": MarketType.PERP,
+        "book": OrderBook.from_two_sided_levels("PERP", [(4990, DEEP)], [(5010, DEEP)]),
+        "updated_ms": NOW,
+        "mark_price_cc": 5000,
+        "volume_qc": DEEP,
+        "status": "active",
+    }
     defaults.update(kw)
     return MarketSnapshot(**defaults)
 
