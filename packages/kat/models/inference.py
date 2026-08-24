@@ -195,7 +195,12 @@ class InferenceEngine:
         self.scored = 0
         self.skipped = 0
         self.dropped_stale = 0
-        self._last_refresh_ms = 0
+        # None, not 0. With `0` the "is a refresh due" arithmetic only comes
+        # out true once the clock passes the interval, which is always the case
+        # for an epoch clock and never the case for a simulated one starting
+        # near zero -- so the engine would silently never load a model in
+        # simulation while working in production.
+        self._last_refresh_ms: int | None = None
 
     # -- model lifecycle -----------------------------------------------------
 
@@ -292,7 +297,11 @@ class InferenceEngine:
         supervisor distinguish "the model is serving nothing" from "the worker
         is not running", which look identical from the loop's side.
         """
-        if now_ms - self._last_refresh_ms >= self.refresh_interval_s * 1000:
+        due = (
+            self._last_refresh_ms is None
+            or now_ms - self._last_refresh_ms >= self.refresh_interval_s * 1000
+        )
+        if due:
             self._last_refresh_ms = now_ms
             await self.refresh_model()
 
