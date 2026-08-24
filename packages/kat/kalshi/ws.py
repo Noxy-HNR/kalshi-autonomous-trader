@@ -31,7 +31,7 @@ import asyncio
 import contextlib
 import random
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import orjson
@@ -224,7 +224,7 @@ class KalshiWebSocket:
                 delay = 1.0  # a clean session resets the backoff
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:  # noqa: BLE001 - the loop must survive anything
+            except Exception as exc:
                 log.warning(
                     "ws.connection_lost", domain=self.domain, error=str(exc),
                     error_type=type(exc).__name__,
@@ -394,7 +394,7 @@ class KalshiWebSocket:
                 result = handler(message)
                 if asyncio.iscoroutine(result):
                     await result
-            except Exception as exc:  # noqa: BLE001 - one bad handler must not kill the feed
+            except Exception as exc:
                 log.error(
                     "ws.handler_failed",
                     domain=self.domain, msg_type=msg_type, error=str(exc), exc_info=True,

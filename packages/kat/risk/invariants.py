@@ -182,7 +182,7 @@ def _is_plain_int(value: object) -> bool:
     from entering the comparison. Callers convert through
     :mod:`kat.common.fixedpoint`, which is exact by construction.
     """
-    return type(value) is int  # noqa: E721 - subclasses (bool) must be rejected
+    return type(value) is int
 
 
 def position_exposure_micros(qty_qc: int, mark_price_cc: int) -> int:
@@ -397,7 +397,7 @@ def assert_invariant_intact() -> None:
     dozen integer comparisons -- nanoseconds -- which buys detection of any
     monkeypatch, plugin, or accidental edit that weakened the rule.
     """
-    if MAX_PERP_LEVERAGE != Decimal("1.00") or MAX_PERP_LEVERAGE_BASIS_POINTS != 10_000:
+    if Decimal("1.00") != MAX_PERP_LEVERAGE or MAX_PERP_LEVERAGE_BASIS_POINTS != 10_000:
         raise InvariantCompromised(
             f"MAX_PERP_LEVERAGE has been altered to {MAX_PERP_LEVERAGE!r}; refusing to trade"
         )

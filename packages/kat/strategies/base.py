@@ -246,11 +246,18 @@ class Strategy(ABC):
 
     # -- optional hooks ------------------------------------------------------
 
-    def on_fill(self, ticker: str, qty_qc: int, price_cc: int) -> None:
-        """Called after one of this strategy's orders fills. Default: ignore."""
+    def on_fill(self, ticker: str, qty_qc: int, price_cc: int) -> None:  # noqa: B027
+        """Called after one of this strategy's orders fills.
 
-    def on_position_closed(self, ticker: str, realized_pnl_micros: int) -> None:
-        """Called when a position opened by this strategy is fully closed."""
+        Deliberately concrete and empty rather than abstract: most strategies do
+        not care, and forcing every one of them to write ``pass`` would be noise.
+        """
+
+    def on_position_closed(self, ticker: str, realized_pnl_micros: int) -> None:  # noqa: B027
+        """Called when a position opened by this strategy is fully closed.
+
+        Optional hook; see :meth:`on_fill` for why it is not abstract.
+        """
 
     def warmup_ms(self) -> int:
         """How much history this strategy needs before its signals are valid.

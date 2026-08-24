@@ -90,7 +90,7 @@ class KillSwitchManager:
             log.info("killswitch.loaded", total=len(self._state), engaged=len(engaged))
             if engaged:
                 log.warning("killswitch.engaged_at_startup", switches=[f"{s}:{n}" for s, n in engaged])
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             # Fail closed: we cannot prove trading is permitted, so it is not.
             self._load_failed = True
             self._loaded = True
@@ -220,7 +220,7 @@ class KillSwitchManager:
                         severity="critical" if engaged else "warning",
                     )
                 )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             # In-memory state already reflects the change and is authoritative
             # for this process; the log line is the durable record if the write
             # failed. Never let a failed write undo a halt.

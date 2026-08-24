@@ -102,7 +102,7 @@ class PerpExecutionEngine(ExecutionEngine):
 
         try:
             orders = await self.rest.get_orders(ticker=order.ticker)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.error(
                 "execution.resolve_unknown_failed",
                 domain="perp", order_id=order.order_id,

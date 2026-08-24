@@ -105,7 +105,7 @@ class KalshiSigner:
     def from_pem(cls, key_id: str, pem: bytes, *, label: str = "kalshi") -> KalshiSigner:
         try:
             key = serialization.load_pem_private_key(pem, password=None)
-        except Exception as exc:  # noqa: BLE001 - the message must not leak key bytes
+        except Exception as exc:
             raise ConfigError(
                 f"{label}: private key is not a readable unencrypted PEM key "
                 f"({type(exc).__name__})"

@@ -39,7 +39,7 @@ from kat.risk.perp_risk import PerpAccountState, PerpPositionState
 
 log = get_logger(__name__)
 
-__all__ = ["ReconciliationReport", "Reconciler"]
+__all__ = ["Reconciler", "ReconciliationReport"]
 
 
 @dataclass(slots=True)
@@ -138,7 +138,7 @@ class Reconciler:
             balance = await self.event_rest.get_balance()
             positions = await self.event_rest.get_positions()
             exchange_orders = await self.event_rest.get_orders(status="resting")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             report.error = f"could not read event-contract account state: {exc}"
             log.error("reconcile.event_query_failed", error=str(exc))
             return report
@@ -217,7 +217,7 @@ class Reconciler:
             positions = await self.perp_rest.get_positions()
             risk = await self.perp_rest.get_risk()
             exchange_orders = await self.perp_rest.get_orders()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             report.error = f"could not read perpetual account state: {exc}"
             log.error("reconcile.perp_query_failed", error=str(exc))
             return report
@@ -294,7 +294,7 @@ class Reconciler:
                 state.exchange_notional_risk_limit_micros = parse_dollars_micros(
                     raw, rounding=Rounding.FLOOR, field="notional_risk_limit"
                 )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             # Not fatal: our own limits are tighter. Recorded so the dashboard
             # can show that the exchange ceiling is currently unverified.
             log.warning("reconcile.notional_limit_unavailable", error=str(exc))
@@ -413,7 +413,7 @@ class Reconciler:
                 if market_type is MarketType.EVENT
                 else await self.perp_rest.get_orders()  # type: ignore[union-attr]
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.error("reconcile.orphan_listing_failed", error=str(exc))
             return 0
 
@@ -429,7 +429,7 @@ class Reconciler:
                         exchange_order_id=order.order_id,
                         client_order_id=order.client_order_id,
                     )
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     log.error(
                         "reconcile.orphan_cancel_failed",
                         exchange_order_id=order.order_id, error=str(exc),

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from kat.common.enums import MarketType, OrderAction, OrderState, OutcomeSide, TimeInForce
+from kat.common.enums import MarketType, OrderAction, OrderState, OutcomeSide
 from kat.common.timeutil import Clock
 from kat.execution.base import ExecutionEngine
 from kat.execution.order import ManagedOrder
@@ -113,7 +113,7 @@ class EventExecutionEngine(ExecutionEngine):
 
         try:
             orders = await self.rest.get_orders(ticker=order.ticker)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.error(
                 "execution.resolve_unknown_failed",
                 order_id=order.order_id, client_order_id=order.client_order_id, error=str(exc),

@@ -27,7 +27,7 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from kat.common.enums import MarketType, OrderState, TradingEnvironment
-from kat.common.errors import KillSwitchEngaged, RiskRejection
+from kat.common.errors import RiskRejection
 from kat.common.ids import use_correlation_id
 from kat.common.timeutil import Clock
 from kat.db.models import Fill as FillRow
@@ -149,7 +149,7 @@ class ExecutionEngine(ABC):
                 order.transition(OrderState.CANCELLED, reason="exchange cancel", strict=False)
             self._persist(order)
             return True
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             # A failed cancel leaves the order working, which is the truthful
             # state. It is NOT marked cancelled on our side, because believing
             # we are flat when we are not is the dangerous error.
@@ -220,7 +220,7 @@ class ExecutionEngine(ABC):
                 ticker=order.ticker, error=str(exc),
             )
             metrics.increment(M_ORDERS_REJECTED, domain=self.market_type.value, reason="ambiguous")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             order.transition(
                 OrderState.REJECTED, reason=f"{type(exc).__name__}: {exc}", strict=False
             )

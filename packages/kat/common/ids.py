@@ -87,7 +87,7 @@ def current_correlation_id() -> str | None:
     return correlation_id_var.get()
 
 
-class use_correlation_id:  # noqa: N801 - used as a context manager, reads as a verb
+class use_correlation_id:
     """Bind a correlation id for the duration of a block.
 
     Usage::

@@ -289,7 +289,7 @@ class KalshiHTTPClient:
             if isinstance(parsed, dict):
                 code = parsed.get("code") or parsed.get("error")
                 message = parsed.get("message") or parsed.get("error") or body
-        except Exception:  # noqa: BLE001 - a non-JSON error body is still an error
+        except Exception:
             pass
         metrics.increment(M_REST_ERRORS, kind=str(response.status_code), domain=self._domain)
         log.warning(

@@ -29,7 +29,7 @@ from kat.observability.metrics import M_RATE_LIMITED, metrics
 
 log = get_logger(__name__)
 
-__all__ = ["BucketKind", "RateLimiter", "TokenBucket", "DEFAULT_ENDPOINT_COST"]
+__all__ = ["DEFAULT_ENDPOINT_COST", "BucketKind", "RateLimiter", "TokenBucket"]
 
 #: Documented default cost for an endpoint with no override.
 DEFAULT_ENDPOINT_COST = 10
@@ -221,7 +221,7 @@ class RateLimiter:
         now = time.monotonic()
         out: dict[str, dict[str, float]] = {}
         for name, b in self._buckets.items():
-            b._refill(now)  # noqa: SLF001 - same module, deliberate
+            b._refill(now)
             out[name] = {
                 "tokens": round(b.tokens, 1),
                 "capacity": round(b.capacity, 1),

@@ -21,6 +21,7 @@ it means the database has been unavailable long enough to matter.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections import deque
 from typing import Any
 
@@ -93,7 +94,7 @@ class AsyncWriter:
         if drain:
             try:
                 await asyncio.wait_for(self._flush_all(), timeout=timeout_s)
-            except (TimeoutError, Exception) as exc:  # noqa: B014
+            except (TimeoutError, Exception) as exc:
                 log.warning("db_writer.drain_incomplete", error=str(exc))
         log.info("db_writer.stopped", written=self._written, dropped=self._dropped)
 
@@ -107,8 +108,7 @@ class AsyncWriter:
         add a branch to the hot path for no benefit. The drop is counted and
         surfaced on the System tab instead.
         """
-        if len(self._queue) >= self._max_size:
-            if not self._evict_one_non_critical():
+        if len(self._queue) >= self._max_size and not self._evict_one_non_critical():
                 # Everything queued is critical and the queue is full: the
                 # database has been down long enough that we are now losing
                 # audit data. Surface it loudly and keep the newest row.
@@ -142,15 +142,15 @@ class AsyncWriter:
 
     async def _run(self) -> None:
         while self._running:
-            try:
+            # A timeout simply means the flush interval elapsed with nothing
+            # queued, which is the common idle case rather than an error.
+            with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._not_empty.wait(), timeout=self._flush_interval)
-            except TimeoutError:
-                pass
             self._not_empty.clear()
             metrics.gauge(M_DB_QUEUE_DEPTH, len(self._queue))
             try:
                 await self._flush_once()
-            except Exception as exc:  # noqa: BLE001 - the writer must never die
+            except Exception as exc:
                 log.error("db_writer.flush_failed", error=str(exc), exc_info=True)
                 await asyncio.sleep(min(5.0, self._flush_interval * 4))
 
@@ -177,7 +177,7 @@ class AsyncWriter:
             self._written += len(batch)
             self._retry_attempts = 0
             metrics.increment(M_DB_WRITES, len(batch))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._retry_attempts += 1
             if self._retry_attempts <= 3:
                 self._retry_batch = batch
@@ -229,7 +229,7 @@ class AsyncWriter:
 def _safe_dict(obj: Base) -> dict[str, Any]:
     try:
         return {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in obj.to_dict().items()}
-    except Exception:  # noqa: BLE001
+    except Exception:
         return {"repr": repr(obj)}
 
 

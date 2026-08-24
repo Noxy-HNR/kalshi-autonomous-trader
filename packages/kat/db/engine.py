@@ -153,7 +153,7 @@ class Database:
                 await conn.execute(text("SELECT 1"))
             self._healthy = True
             return True
-        except Exception as exc:  # noqa: BLE001 - a probe must not propagate
+        except Exception as exc:
             self._healthy = False
             log.warning("database.ping_failed", error=str(exc))
             return False

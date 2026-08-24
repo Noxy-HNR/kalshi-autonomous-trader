@@ -222,12 +222,13 @@ def test_over_stated_reduction_cannot_drive_exposure_negative():
 
 
 def test_the_declared_maximum_is_one():
-    assert MAX_PERP_LEVERAGE == Decimal("1.00")
+    assert Decimal("1.00") == MAX_PERP_LEVERAGE
     assert MAX_PERP_LEVERAGE_BASIS_POINTS == 10_000
 
 
 def test_self_check_passes_on_an_intact_build():
-    assert_invariant_intact() is None
+    # Returns None and, crucially, does not raise.
+    assert assert_invariant_intact() is None
 
 
 def test_self_check_detects_a_weakened_evaluation(monkeypatch: pytest.MonkeyPatch):

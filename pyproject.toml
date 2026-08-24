@@ -83,7 +83,16 @@ src = ["packages", "apps", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RUF"]
-ignore = ["E501", "B008", "RUF012"]
+ignore = [
+  "E501",   # line length is enforced by the formatter, not the linter
+  "B008",   # FastAPI's Depends() idiom requires calls in argument defaults
+  "RUF012", # ClassVar annotations on mutable class attrs add noise here
+  # `class X(str, Enum)` rather than `StrEnum`: every call site uses `.value`
+  # explicitly, and the str mixin is what lets these round-trip through pydantic
+  # and SQLAlchemy string columns unchanged. Switching would be churn for no
+  # behavioural gain.
+  "UP042",
+]
 
 [tool.mypy]
 python_version = "3.11"

@@ -18,6 +18,7 @@ because discipline fails and a processor does not.
 from __future__ import annotations
 
 import atexit
+import contextlib
 import logging
 import logging.handlers
 import queue
@@ -199,10 +200,10 @@ def shutdown_logging() -> None:
     """Drain and stop the background log writer."""
     global _listener, _configured
     if _listener is not None:
-        try:
+        # Shutdown must never raise: a failure to stop the log writer cannot
+        # be allowed to mask whatever we were shutting down for.
+        with contextlib.suppress(Exception):
             _listener.stop()
-        except Exception:  # noqa: BLE001 - shutdown must never raise
-            pass
         _listener = None
     _configured = False
 

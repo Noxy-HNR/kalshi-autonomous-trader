@@ -49,7 +49,7 @@ class _Histogram:
 
         def pct(p: float) -> float:
             # Nearest-rank percentile; exact for the retained window.
-            idx = min(n - 1, max(0, int(round(p * (n - 1)))))
+            idx = min(n - 1, max(0, round(p * (n - 1))))
             return ordered[idx]
 
         return {
