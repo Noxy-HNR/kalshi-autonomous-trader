@@ -1,0 +1,174 @@
+name: CI
+
+# Native CI, deliberately not Docker-based: the platform runs as native processes
+# on Windows and Linux, so the pipeline exercises it the same way.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUNBUFFERED: "1"
+  # Tests run against SQLite so no service container is required. The same
+  # models run on PostgreSQL in production; the postgres job below verifies that.
+  KAT_DATABASE__URL: "sqlite+aiosqlite:///./ci.db"
+
+jobs:
+  # The leverage invariant gets its own job so a failure is unmissable in the
+  # checks list rather than buried inside a general test run.
+  leverage-invariant:
+    name: 1.00x leverage invariant
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Leverage tests
+        run: pytest tests/leverage -v --tb=short
+
+  test:
+    name: Tests (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows is the initial deployment target and Linux is the migration
+        # target, so both are tested rather than assumed to behave alike.
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Test
+        run: pytest -q --tb=short
+
+  lint:
+    name: Lint and types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Ruff
+        run: ruff check packages/ tests/ apps/
+      - name: Ruff format check
+        run: ruff format --check packages/ tests/ apps/
+        continue-on-error: true
+      - name: Mypy
+        run: mypy packages/kat
+        continue-on-error: true
+
+  postgres:
+    name: PostgreSQL integration
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: kat
+          POSTGRES_PASSWORD: kat
+          POSTGRES_DB: kat
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      KAT_DATABASE__URL: "postgresql+asyncpg://kat:kat@127.0.0.1:5432/kat"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Migrations apply cleanly
+        run: alembic upgrade head
+      - name: Integration tests
+        run: pytest -m integration -q --tb=short
+
+  secrets:
+    name: No committed secrets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check for credential material in tracked files
+        run: |
+          set -e
+          # Private keys, and .env files that are not the committed example.
+          if git ls-files | grep -E '\.(key|pem|p12|pfx)$'; then
+            echo "::error::private key material is tracked in git"
+            exit 1
+          fi
+          if git ls-files | grep -E '(^|/)\.env$'; then
+            echo "::error::.env is tracked in git"
+            exit 1
+          fi
+          if git grep -nE -- '-----BEGIN [A-Z ]*PRIVATE KEY-----' -- . ':!*.md'; then
+            echo "::error::a PEM private key block is committed"
+            exit 1
+          fi
+          echo "no committed secrets found"
+
+  dashboard:
+    name: Dashboard build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: apps/dashboard/package-lock.json
+      - name: Skip when the dashboard is not present yet
+        id: check
+        run: |
+          if [ -f apps/dashboard/package.json ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install
+        if: steps.check.outputs.present == 'true'
+        run: npm --prefix apps/dashboard ci
+      - name: Type check
+        if: steps.check.outputs.present == 'true'
+        run: npm --prefix apps/dashboard run typecheck
+      - name: Lint
+        if: steps.check.outputs.present == 'true'
+        run: npm --prefix apps/dashboard run lint
+      - name: Build
+        if: steps.check.outputs.present == 'true'
+        run: npm --prefix apps/dashboard run build
