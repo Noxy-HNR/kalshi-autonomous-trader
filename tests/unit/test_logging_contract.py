@@ -83,3 +83,70 @@ def test_the_detector_actually_detects(tmp_path: pathlib.Path):
 def test_at_least_one_file_was_scanned():
     """A glob that matches nothing would make every test above vacuous."""
     assert len(python_files()) > 50
+
+
+# ---------------------------------------------------------------------------
+# redaction
+# ---------------------------------------------------------------------------
+
+
+class TestRedaction:
+    """Masking must hide the credential without destroying the message.
+
+    The pattern that motivated these: `[A-Za-z0-9+/]{60,}` matched every
+    SHA-256 digest in the system, and a match replaced the *whole* value. A
+    database IntegrityError naming a duplicate content_hash therefore logged as
+    `error=<redacted>`, which made a real write failure impossible to diagnose
+    from the logs at all.
+    """
+
+    def test_a_hex_digest_is_not_a_credential(self):
+        from kat.observability.logging import _redact_value
+
+        digest = "a1298085fce164ddf51543c1ea3bfa1775c864248437f04708a1d76bd7804cd0"
+        message = f"duplicate key violates uq_news_articles. Key (content_hash)=({digest})"
+        assert _redact_value(message) == message
+
+    def test_a_long_base64_token_is_masked(self):
+        from kat.observability.logging import _redact_value
+
+        token = (
+            "dGhpcyBpcyBhIHZlcnkgbG9uZyBiYXNlNjQgc2lnbmF0dXJlIHRoYXQgc2hvdWxk"
+            "IGJlIG1hc2tlZA=="
+        )
+        redacted = _redact_value(f"Authorization: Bearer {token} end")
+        assert token not in redacted
+        assert token[:24] not in redacted
+        assert "<redacted>" in redacted
+
+    def test_the_surrounding_message_survives(self):
+        """Only the matched span is replaced, not everything around it."""
+        from kat.observability.logging import _redact_value
+
+        token = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZnaGlqa2xtbm9wcXJzdHV2"
+        redacted = _redact_value(f"request failed with 401 for {token} on /orders")
+        assert "request failed with 401 for" in redacted
+        assert "on /orders" in redacted
+        assert token not in redacted
+
+    def test_a_private_key_block_is_masked(self):
+        from kat.observability.logging import _redact_value
+
+        key = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIB\n-----END RSA PRIVATE KEY-----"
+        redacted = _redact_value(f"loaded {key} ok")
+        assert "MIIEowIB" not in redacted
+        assert redacted.startswith("loaded ")
+        assert redacted.endswith(" ok")
+
+    def test_ordinary_identifiers_are_left_alone(self):
+        from kat.observability.logging import _redact_value
+
+        for value in ("ord_mt7abc123", "KXFEDFUNDSYEAR-37JAN01-T1.00", "event.mean_reversion"):
+            assert _redact_value(value) == value
+
+    def test_secret_keys_are_still_replaced_wholesale(self):
+        from kat.observability.logging import _redact
+
+        out = _redact(None, "info", {"api_key_id": "abc123", "ticker": "KX-1"})
+        assert out["api_key_id"] == "<redacted>"
+        assert out["ticker"] == "KX-1"

@@ -55,17 +55,35 @@ _SECRET_KEYS = frozenset(
 )
 
 # Values that look like credentials even under an innocent key name.
+#
+# The base64 pattern deliberately requires at least one character outside the
+# hex alphabet. Without that exclusion it matched every SHA-256 digest in the
+# system -- content hashes, artefact checksums, ids -- and because a match used
+# to replace the *whole* value, one digest appearing anywhere inside a message
+# destroyed the entire message. That is not hypothetical: a database
+# IntegrityError naming a duplicate content_hash logged as `error=<redacted>`,
+# which made a real write failure impossible to diagnose from the logs at all.
 _SECRET_PATTERNS = (
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S),
-    re.compile(r"\b[A-Za-z0-9+/]{60,}={0,2}\b"),  # long base64: signatures, tokens
+    # Long base64 (signatures, tokens), but not a plain hex digest.
+    re.compile(
+        r"\b(?=[A-Za-z0-9+/]{60,}={0,2}\b)"
+        r"[A-Za-z0-9+/]*[G-Zg-z+/][A-Za-z0-9+/]{20,}={0,2}"
+    ),
 )
 
 
 def _redact_value(value: Any) -> Any:
+    """Mask the credential, not the message it appears in.
+
+    Replacing the whole value on a match throws away every other word in the
+    string, including the part that says what actually went wrong. Only the
+    matched span is replaced, so a message that merely *contains* a token still
+    reads.
+    """
     if isinstance(value, str):
         for pattern in _SECRET_PATTERNS:
-            if pattern.search(value):
-                return "<redacted>"
+            value = pattern.sub("<redacted>", value)
     return value
 
 

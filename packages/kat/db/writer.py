@@ -25,6 +25,8 @@ import contextlib
 from collections import deque
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
+
 from kat.config.settings import get_settings
 from kat.db.base import Base
 from kat.db.engine import Database, get_database
@@ -185,13 +187,20 @@ class AsyncWriter:
             self._written += len(batch)
             self._retry_attempts = 0
             metrics.increment(M_DB_WRITES, len(batch))
+        except IntegrityError as exc:
+            # A constraint violation will not go away on a retry: the row
+            # conflicts with what is already stored, and re-sending the same
+            # batch three times just loses the same 500 rows more slowly. The
+            # batch is replayed row by row instead, so the one offending row is
+            # dropped and the other 499 are written.
+            await self._flush_individually(batch, exc)
         except Exception as exc:
             self._retry_attempts += 1
             if self._retry_attempts <= 3:
                 self._retry_batch = batch
                 log.warning(
                     "db_writer.batch_retry", attempt=self._retry_attempts, rows=len(batch),
-                    error=str(exc),
+                    error=str(exc), error_type=type(exc).__name__,
                 )
             else:
                 # Abandon the batch, but log every critical row in full so the
@@ -204,11 +213,80 @@ class AsyncWriter:
                         table=type(item.obj).__tablename__,
                         row=_safe_dict(item.obj),
                         error=str(exc),
+                        error_type=type(exc).__name__,
                     )
                 self._dropped += len(batch)
                 metrics.increment(M_DB_DROPS, len(batch), kind="write_failed")
                 self._retry_attempts = 0
-                log.error("db_writer.batch_abandoned", rows=len(batch), error=str(exc))
+                log.error(
+                    "db_writer.batch_abandoned",
+                    rows=len(batch), error=str(exc), error_type=type(exc).__name__,
+                )
+
+    async def _flush_individually(self, batch: list[_Item], cause: Exception) -> None:
+        """Write a conflicted batch one row at a time.
+
+        Slower by design and only reached after a constraint violation. The
+        alternative is discarding every row that happened to share a batch with
+        a duplicate, which is how a restart that re-ingests six hours of news
+        silently loses six hours of everything else.
+        """
+        written = 0
+        conflicted: dict[str, int] = {}
+        failed: list[_Item] = []
+
+        for item in batch:
+            try:
+                async with self._db.session() as session:
+                    if _has_primary_key(item.obj):
+                        await session.merge(item.obj)
+                    else:
+                        session.add(item.obj)
+                written += 1
+            except IntegrityError:
+                # Already stored. For an append-only row with a natural key this
+                # is the normal outcome of a replay, not an error.
+                table = type(item.obj).__tablename__
+                conflicted[table] = conflicted.get(table, 0) + 1
+            except Exception as exc:
+                failed.append(item)
+                if item.critical:
+                    log.error(
+                        "db_writer.row_abandoned",
+                        table=type(item.obj).__tablename__,
+                        row=_safe_dict(item.obj),
+                        error=str(exc),
+                        error_type=type(exc).__name__,
+                    )
+
+        self._written += written
+        self._dropped += len(failed)
+        self._retry_attempts = 0
+        if written:
+            metrics.increment(M_DB_WRITES, written)
+        if failed:
+            metrics.increment(M_DB_DROPS, len(failed), kind="write_failed")
+        if conflicted:
+            metrics.increment(M_DB_DROPS, sum(conflicted.values()), kind="already_stored")
+
+        log.info(
+            "db_writer.batch_split",
+            rows=len(batch),
+            written=written,
+            already_stored=conflicted or None,
+            failed=len(failed),
+            cause=type(cause).__name__,
+        )
+
+    async def flush(self) -> None:
+        """Drain the queue and return once everything pending has been attempted.
+
+        Public because callers legitimately need a checkpoint -- a test that has
+        just enqueued rows, or a shutdown path that wants the queue empty before
+        it reports clean. It is not on the hot path: the background loop flushes
+        on its own interval and nothing on the order path waits for this.
+        """
+        await self._flush_all()
 
     async def _flush_all(self) -> None:
         while self._queue or self._retry_batch:
