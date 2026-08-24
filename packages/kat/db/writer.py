@@ -25,7 +25,7 @@ import contextlib
 from collections import deque
 from typing import Any
 
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DataError, IntegrityError
 
 from kat.config.settings import get_settings
 from kat.db.base import Base
@@ -187,12 +187,12 @@ class AsyncWriter:
             self._written += len(batch)
             self._retry_attempts = 0
             metrics.increment(M_DB_WRITES, len(batch))
-        except IntegrityError as exc:
-            # A constraint violation will not go away on a retry: the row
-            # conflicts with what is already stored, and re-sending the same
-            # batch three times just loses the same 500 rows more slowly. The
-            # batch is replayed row by row instead, so the one offending row is
-            # dropped and the other 499 are written.
+        except (IntegrityError, DataError) as exc:
+            # A row the database refuses will not become acceptable on a retry:
+            # it conflicts with what is stored, or it does not fit the column.
+            # Re-sending the same batch three times just loses the same 500 rows
+            # more slowly. The batch is replayed row by row instead, so the one
+            # offending row is dropped and the other 499 are written.
             await self._flush_individually(batch, exc)
         except Exception as exc:
             self._retry_attempts += 1
@@ -248,6 +248,19 @@ class AsyncWriter:
                 # is the normal outcome of a replay, not an error.
                 table = type(item.obj).__tablename__
                 conflicted[table] = conflicted.get(table, 0) + 1
+            except DataError as exc:
+                # The row does not fit the schema. Unlike a duplicate this is a
+                # genuine defect -- a column too narrow, or a value that should
+                # have been bounded upstream -- so it is reported, not counted
+                # as a benign replay.
+                failed.append(item)
+                log.error(
+                    "db_writer.row_rejected",
+                    table=type(item.obj).__tablename__,
+                    row=_safe_dict(item.obj),
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
             except Exception as exc:
                 failed.append(item)
                 if item.critical:

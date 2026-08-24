@@ -106,7 +106,12 @@ class IngestMixin:
     """
 
     source: Mapped[str] = mapped_column(String(64), nullable=False)
-    source_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    #: The source's own identifier for this record. Bounded, but generously:
+    #: exchange rows carry a short order id, while a news feed's external id is
+    #: routinely the article URL. 128 characters looked ample and was not --
+    #: Federal Reserve press-release URLs alone overflow it, and the resulting
+    #: StringDataRightTruncationError failed the entire write batch.
+    source_id: Mapped[str | None] = mapped_column(String(512), nullable=True)
     source_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ingested_ts: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow
