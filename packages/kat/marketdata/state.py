@@ -27,6 +27,26 @@ log = get_logger(__name__)
 __all__ = ["MarketSnapshot", "MarketState", "funding_rate_bps_per_hour"]
 
 
+def funding_rate_per_hour(
+    rate: float | None, interval_hours: float = 1.0
+) -> float | None:
+    """Convert a raw Kalshi funding rate into a raw fraction per hour.
+
+    The raw rate is a fraction charged over one funding interval, so the
+    conversion is ``rate / interval_hours``. This is the single division;
+    :func:`funding_rate_bps_per_hour` is defined in terms of it, so the two can
+    never drift apart.
+
+    Returns ``None`` when the rate is unknown, which callers must treat as "no
+    funding information" rather than as a rate of zero.
+    """
+    if rate is None:
+        return None
+    if interval_hours <= 0:
+        return None
+    return rate / interval_hours
+
+
 def funding_rate_bps_per_hour(
     rate: float | None, interval_hours: float = 1.0
 ) -> float | None:
@@ -41,11 +61,8 @@ def funding_rate_bps_per_hour(
     Returns ``None`` when the rate is unknown, which callers must treat as
     "no funding information" rather than as a rate of zero.
     """
-    if rate is None:
-        return None
-    if interval_hours <= 0:
-        return None
-    return rate * 10_000.0 / interval_hours
+    per_hour = funding_rate_per_hour(rate, interval_hours)
+    return None if per_hour is None else per_hour * 10_000.0
 
 
 @dataclass(slots=True)

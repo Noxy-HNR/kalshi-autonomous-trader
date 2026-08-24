@@ -84,7 +84,7 @@ from kat.features.spec import (
     FeatureVector,
 )
 from kat.marketdata.book import OrderBook
-from kat.marketdata.state import MarketSnapshot
+from kat.marketdata.state import MarketSnapshot, funding_rate_per_hour
 from kat.observability.metrics import metrics
 from kat.strategies.common import (
     F_BOOK_IMBALANCE,
@@ -452,7 +452,12 @@ class FeatureInputs:
             last_trade_cc=snapshot.last_trade_cc,
             mark_price_cc=snapshot.mark_price_cc,
             funding_ts_ms=snapshot.updated_ms,
-            funding_rate_hourly=snapshot.funding_rate,
+            # snapshot.funding_rate is per *interval*; this field is per
+            # *hour*. Assigning one to the other directly overstated the rate
+            # by the interval length -- 8x on Kalshi's usual schedule.
+            funding_rate_hourly=funding_rate_per_hour(
+                snapshot.funding_rate, snapshot.funding_interval_hours
+            ),
             next_funding_ms=snapshot.next_funding_ms,
             close_ts_ms=close,
         )

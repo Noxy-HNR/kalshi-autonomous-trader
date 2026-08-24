@@ -28,12 +28,14 @@ import asyncio
 import sys
 from typing import Any
 
+from kat.arbitrage.scanner import ArbitrageScanner, opportunity_to_intents
 from kat.common.enums import MarketType, StrategyState, TradingEnvironment
 from kat.common.errors import ConfigError
 from kat.common.timeutil import SystemClock
 from kat.config.settings import AppSettings, get_settings
 from kat.engine.context import EngineContext, set_context
 from kat.engine.decision import DecisionRecorder
+from kat.engine.features import FeatureWorker
 from kat.engine.ingestion import (
     MarketDataIngestor,
     select_event_watchlist,
@@ -51,7 +53,11 @@ from kat.kalshi.perps.rest import PerpsREST
 from kat.kalshi.ratelimit import RateLimiter
 from kat.kalshi.ws import KalshiWebSocket
 from kat.marketdata.state import MarketState
+from kat.models.inference import InferenceEngine
+from kat.models.registry import ModelRegistry
+from kat.news.pipeline import NewsPipeline
 from kat.observability.logging import configure_logging, get_logger
+from kat.research.loop import ResearchLoop
 from kat.risk.event_risk import EventAccountState, EventRiskEngine
 from kat.risk.invariants import MAX_PERP_LEVERAGE, assert_invariant_intact
 from kat.risk.perp_risk import PerpAccountState, PerpRiskEngine
@@ -84,6 +90,15 @@ class Platform:
         self.event_rest: EventContractsREST | None = None
         self.perp_rest: PerpsREST | None = None
         self.perps_enabled = False
+
+        # Populated during build. Declared here so an attribute that has not
+        # been built yet reads as absent rather than raising AttributeError from
+        # a component body that started early.
+        self.feature_workers: dict[MarketType, FeatureWorker] = {}
+        self.inference_engines: dict[MarketType, InferenceEngine] = {}
+        self.news: NewsPipeline | None = None
+        self.arbitrage: ArbitrageScanner | None = None
+        self.research: ResearchLoop | None = None
 
     # -- construction --------------------------------------------------------
 
@@ -283,7 +298,52 @@ class Platform:
             state=StrategyState.PAPER.value,
         )
 
+        # Features come before everything else that thinks. Without them every
+        # strategy skips on `*_unavailable`, the risk engine is never consulted,
+        # and the platform looks healthy while doing nothing at all.
+        self.feature_workers = {
+            MarketType.EVENT: FeatureWorker(
+                MarketType.EVENT, self.context.market_states[MarketType.EVENT], self.clock
+            ),
+            MarketType.PERP: FeatureWorker(
+                MarketType.PERP, self.context.market_states[MarketType.PERP], self.clock
+            ),
+        }
+
+        # Inference serves whatever the registry has deployed, or nothing. A
+        # model has no order authority: its output reaches a strategy as one
+        # input and reaches the audit record as provenance.
+        model_registry = ModelRegistry(self.app.database) if self.app.database else None
+        self.inference_engines = (
+            {
+                market_type: InferenceEngine(model_registry, market_type)
+                for market_type in (MarketType.EVENT, MarketType.PERP)
+            }
+            if model_registry is not None
+            else {}
+        )
+
+        # Arbitrage is cross-market, so it enters through an intent source
+        # rather than the per-ticker strategy sweep. Its intents then travel the
+        # identical path: risk engine, decision record, execution.
+        self.arbitrage = ArbitrageScanner(
+            market_state=self.context.market_states[MarketType.EVENT],
+            clock=self.clock,
+            writer=self.app.writer,
+        )
+        event_loop.add_intent_source("arbitrage", self._scan_arbitrage)
+
         self.context.loops = {MarketType.EVENT: event_loop, MarketType.PERP: perp_loop}
+        self.research = ResearchLoop(
+            settings=settings.research,
+            registry=registry,
+            market_states=self.context.market_states,
+            loops=self.context.loops,
+            clock=self.clock,
+            mode=settings.operating_mode,
+        )
+        self.context.research_loop = self.research
+
         self.context.reconciler = Reconciler(
             event_rest=self.event_rest,
             perp_rest=self.perp_rest,
@@ -376,6 +436,27 @@ class Platform:
         for market_type, loop in self.context.loops.items():
             if market_type is MarketType.PERP and not self.perps_enabled:
                 continue
+
+            worker = self.feature_workers[market_type]
+            self.app.register(
+                ServiceComponent(
+                    f"{market_type.value}-features",
+                    run=_bind(worker.run, loop),
+                    health=worker.healthy,
+                    critical=False,
+                )
+            )
+
+            inference = self.inference_engines.get(market_type)
+            if inference is not None:
+                self.app.register(
+                    ServiceComponent(
+                        f"{market_type.value}-inference",
+                        run=_bind(inference.run, loop),
+                        critical=False,
+                    )
+                )
+
             self.app.register(
                 ServiceComponent(
                     f"{market_type.value}-trading",
@@ -385,11 +466,121 @@ class Platform:
                 )
             )
 
+        if settings.research.enabled:
+            self.app.register(
+                ServiceComponent(
+                    "research-regimes",
+                    run=_bind(self.research.run_regimes),
+                    critical=False,
+                )
+            )
+            self.app.register(
+                ServiceComponent("research", run=self.research.run, critical=False)
+            )
+
+        if settings.news.enabled:
+            self.news = NewsPipeline(settings.news, self.clock, writer=self.app.writer)
+            self.app.register(
+                ServiceComponent(
+                    "news",
+                    start=_async_call(self.news.load_sources),
+                    run=self.news.run,
+                    stop=self.news.aclose,
+                    health=self.news.healthy,
+                    critical=False,
+                )
+            )
+            self.app.register(
+                ServiceComponent("news-fanout", run=self._news_fanout, critical=False)
+            )
+
         self.app.register(
             ServiceComponent("dashboard-api", start=self._start_api, stop=self._stop_api)
         )
 
     # -- component bodies ----------------------------------------------------
+
+    def _scan_arbitrage(self, now_ms: int) -> list[Any]:
+        """One arbitrage pass, converted to intents.
+
+        Returns an empty list on any failure. A scanner that raises must not
+        stop the trading cycle: the strategies still have opinions worth acting
+        on, and an arbitrage that was not found is not an emergency.
+        """
+        try:
+            opportunities = self.arbitrage.scan()
+        except Exception as exc:
+            log.error("arbitrage.scan_failed", error=str(exc), exc_info=True)
+            return []
+
+        intents: list[Any] = []
+        for opportunity in opportunities:
+            intents.extend(opportunity_to_intents(opportunity))
+        if intents:
+            log.info(
+                "arbitrage.intents",
+                opportunities=len(opportunities), intents=len(intents), now_ms=now_ms,
+            )
+        return intents
+
+    async def _news_fanout(self) -> None:
+        """Publish news signals into each loop, and market profiles into the matcher.
+
+        Kept separate from the pipeline's own poll loop because the two run at
+        different cadences for different reasons: fetching is slow and polite to
+        the publishers, while the loops need whatever is already known refreshed
+        against the current watchlist.
+        """
+        from kat.news.matching import MarketProfile
+
+        while True:
+            try:
+                if self.news is None:  # pragma: no cover - not registered without news
+                    return
+                now_ms = self.clock.now_ms()
+                profiles = []
+                for market_type, state in self.context.market_states.items():
+                    if market_type is MarketType.PERP and not self.perps_enabled:
+                        continue
+                    for ticker in state.tickers():
+                        snapshot = state.get(ticker)
+                        if snapshot is None:
+                            continue
+                        meta = snapshot.metadata
+                        profiles.append(
+                            MarketProfile.build(
+                                ticker=ticker,
+                                market_type=market_type,
+                                title=str(meta.get("title", "")),
+                                event_ticker=str(meta.get("event_ticker", "")),
+                                series_ticker=str(meta.get("series_ticker", "")),
+                                rules=str(meta.get("rules_primary", "")),
+                                close_ms=(
+                                    meta.get("close_ts_ms")
+                                    if isinstance(meta.get("close_ts_ms"), int)
+                                    else None
+                                ),
+                            )
+                        )
+                self.news.set_markets(profiles)
+
+                # signals_at filters on ingestion time, so a loop only ever sees
+                # what this process could actually have acted on.
+                signals = self.news.signals_at(now_ms)
+                for market_type, loop in self.context.loops.items():
+                    if market_type is MarketType.PERP and not self.perps_enabled:
+                        continue
+                    loop.research = {
+                        ticker: blob
+                        for ticker, blob in signals.items()
+                        if self.context.market_states[market_type].get(ticker) is not None
+                    }
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.error("news.fanout_failed", error=str(exc), exc_info=True)
+            await asyncio.sleep(30)
+
 
     async def _reconcile_once(self) -> None:
         """Reconcile before any trading is permitted.
@@ -503,6 +694,30 @@ def _async_noop(fn: Any):
         fn()
 
     return _stop
+
+
+def _bind(fn: Any, *args: Any):
+    """A no-argument coroutine factory, for a component body that needs one.
+
+    ServiceComponent bodies take no arguments; the feature and inference workers
+    need the loop they publish into. A lambda would capture the loop variable by
+    reference and, inside a for-loop, every component would end up bound to the
+    last iteration's loop.
+    """
+
+    async def _run() -> None:
+        await fn(*args)
+
+    return _run
+
+
+def _async_call(fn: Any):
+    """Adapt a synchronous start-up step to the async component contract."""
+
+    async def _start() -> None:
+        fn()
+
+    return _start
 
 
 async def build_application(settings: AppSettings | None = None) -> Platform:

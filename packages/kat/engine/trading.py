@@ -145,6 +145,12 @@ class TradingLoop:
         self.model_probabilities: dict[str, tuple[float, str, str]] = {}
         #: Research/news signals keyed by ticker, already time-filtered.
         self.research: dict[str, dict[str, Any]] = {}
+        #: Cross-market intent producers; see :meth:`add_intent_source`.
+        self.intent_sources: list[tuple[str, Any]] = []
+        #: Full feature vectors keyed by ticker, published by the feature
+        #: worker. Strategies read ``features``; inference needs the timestamps
+        #: these carry.
+        self.feature_vectors: dict[str, Any] = {}
         #: Detected regime keyed by ticker.
         self.regimes: dict[str, str] = {}
         #: Features keyed by ticker, already filtered to what is knowable now.
@@ -155,6 +161,18 @@ class TradingLoop:
         self._running = False
 
     # -- registration --------------------------------------------------------
+
+    def add_intent_source(self, name: str, produce: Any) -> None:
+        """Register a producer of intents that is not a per-ticker strategy.
+
+        The strategy sweep asks each strategy about each market in turn, which
+        is the wrong shape for anything cross-market: an arbitrage between three
+        contracts is not an opinion about any one of them. A source is called
+        once per cycle with ``now_ms`` and returns intents that then travel the
+        *same* path as every other intent -- risk engine, decision record,
+        execution. There is no shortcut here, only a different way in.
+        """
+        self.intent_sources.append((name, produce))
 
     def add_strategy(self, strategy: Strategy) -> None:
         if strategy.market_type is not self.market_type:
@@ -265,6 +283,18 @@ class TradingLoop:
                 for intent in produced or []:
                     intents.append((strategy, intent))
 
+        for name, produce in self.intent_sources:
+            try:
+                for intent in produce(now_ms) or []:
+                    intents.append((None, intent))
+            except Exception as exc:
+                result.errors += 1
+                log.error(
+                    "trading.intent_source_failed",
+                    domain=self.market_type.value, source=name,
+                    error=str(exc), exc_info=True,
+                )
+
         result.intents_generated = len(intents)
         if not intents:
             result.duration_ms = (time.monotonic() - started) * 1000
@@ -284,9 +314,22 @@ class TradingLoop:
     # -- one intent ----------------------------------------------------------
 
     async def _process(
-        self, strategy: Strategy, intent: OrderIntent, now_ms: int, result: CycleResult
+        self, strategy: Strategy | None, intent: OrderIntent, now_ms: int, result: CycleResult
     ) -> None:
-        """Take one intent from strategy opinion to submitted order (or not)."""
+        """Take one intent from opinion to submitted order (or not).
+
+        ``strategy`` is ``None`` for an intent from a cross-market source, which
+        has no per-ticker strategy behind it. Such an intent must already carry
+        its own identity -- everything downstream, including the audit record,
+        is keyed on it.
+        """
+        if strategy is None and not intent.strategy_id:
+            result.errors += 1
+            log.error(
+                "trading.unattributed_intent",
+                domain=self.market_type.value, ticker=intent.ticker,
+            )
+            return
         intent.strategy_id = intent.strategy_id or strategy.strategy_id
         intent.strategy_version = intent.strategy_version or strategy.version
         intent.decision_id = intent.decision_id or new_decision_id()
@@ -323,7 +366,7 @@ class TradingLoop:
                 result.errors += 1
                 log.error(
                     "trading.risk_evaluation_failed",
-                    ticker=intent.ticker, strategy_id=strategy.strategy_id,
+                    ticker=intent.ticker, strategy_id=intent.strategy_id,
                     error=str(exc), exc_info=True,
                 )
                 return
@@ -384,7 +427,7 @@ class TradingLoop:
                     "exchange_order_id": order.exchange_order_id,
                 },
             )
-            if order.filled_qty_qc > 0:
+            if order.filled_qty_qc > 0 and strategy is not None:
                 strategy.on_fill(
                     intent.ticker, order.filled_qty_qc, order.avg_fill_price_cc or 0
                 )
