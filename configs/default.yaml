@@ -1,0 +1,82 @@
+# Default configuration for the Kalshi Autonomous Trader.
+#
+# Precedence: these values < .env file < real environment variables.
+# Nested env vars use the KAT_ prefix and __ as the delimiter, e.g.
+#   KAT_KALSHI__EVENT_CREDENTIALS__API_KEY_ID=...
+#
+# NOTE: there is deliberately no perpetual leverage setting anywhere in this
+# file or in the settings model. The 1.00x ceiling is a comparison in
+# kat/risk/invariants.py, not a value, and cannot be configured.
+
+operating_mode: gated_discovery   # Mode D -- the recommended default
+environment: paper                # paper | demo | live
+live_trading_armed: false         # must ALSO be true (with environment: live)
+
+api_host: 127.0.0.1
+api_port: 8000
+log_level: INFO
+
+max_market_data_age_ms: 5000
+max_account_state_age_ms: 30000
+reconciliation_timeout_s: 30.0
+
+kalshi:
+  request_timeout_s: 8.0
+  connect_timeout_s: 4.0
+  ws_ping_interval_s: 10.0
+  ws_ping_timeout_s: 10.0
+  ws_max_reconnect_delay_s: 30.0
+  rate_limit_utilisation: "0.80"
+
+database:
+  url: postgresql+asyncpg://kat:kat@127.0.0.1:5432/kat
+  write_queue_size: 20000
+  write_batch_size: 500
+  write_flush_interval_s: 0.5
+
+# Event contracts are fully collateralised; these limits govern concentration,
+# sizing and loss budgets. Every value is clamped by the backend on load.
+event_risk:
+  max_position_pct_equity: "0.10"
+  max_portfolio_exposure_pct: "0.60"
+  max_loss_per_trade_pct: "0.02"
+  max_daily_loss_pct: "0.05"
+  max_drawdown_pct: "0.20"
+  max_correlated_exposure_pct: "0.25"
+  max_open_positions: 20
+  max_order_notional_usd: "25.00"
+  max_spread_cc: 300
+  min_edge_cc: 200
+
+# Perpetuals. max_exposure_pct_equity can only make the platform MORE
+# conservative than the 1.00x invariant; it is clamped to <= 1.00 and the
+# invariant is applied independently afterwards regardless of its value.
+perp_risk:
+  max_exposure_pct_equity: "0.50"
+  max_position_pct_equity: "0.15"
+  max_loss_per_trade_pct: "0.02"
+  max_daily_loss_pct: "0.04"
+  max_drawdown_pct: "0.15"
+  max_open_positions: 8
+  max_order_notional_usd: "25.00"
+  min_liquidation_buffer_pct: "0.50"
+  max_funding_rate_bps_per_hour: "5"
+
+research:
+  enabled: true
+  loop_interval_s: 900
+  training_interval_s: 21600
+  min_trades_for_promotion: 100
+  min_oos_sharpe: "0.50"
+  min_paper_trades_for_live: 50
+
+news:
+  enabled: true
+  poll_interval_s: 300
+  feeds_file: configs/news_sources.yaml
+
+llm:
+  enabled: false
+  base_url: http://127.0.0.1:11434/v1
+  model: llama3.1:8b
+  max_influence_pct: "0.25"

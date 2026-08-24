@@ -1,0 +1,96 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kalshi-autonomous-trader"
+version = "0.1.0"
+description = "Autonomous trading platform for Kalshi event contracts and perpetual futures"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+readme = "README.md"
+
+dependencies = [
+  # --- Web / API surface (dashboard backend, health endpoints) ---
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.34",
+  "pydantic>=2.9",
+  "pydantic-settings>=2.6",
+  # --- Networking: Kalshi REST + WebSocket ---
+  "httpx[http2]>=0.28",
+  "websockets>=14",
+  "cryptography>=44",          # RSA-PSS request signing required by Kalshi auth
+  "orjson>=3.10",              # fast JSON on the market-data hot path
+  "tenacity>=9",               # bounded backoff for idempotent calls only
+  # --- Storage ---
+  "SQLAlchemy[asyncio]>=2.0",
+  "asyncpg>=0.30",             # PostgreSQL async driver (production)
+  "aiosqlite>=0.20",           # SQLite async driver (tests / no-server dev)
+  "alembic>=1.14",             # schema migrations
+  "greenlet>=3",               # required by SQLAlchemy async
+  # --- Research / ML ---
+  "numpy>=2.1",
+  "pandas>=2.2",
+  "scipy>=1.14",
+  "scikit-learn>=1.6",
+  "xgboost>=2.1",
+  "lightgbm>=4.5",
+  # --- Ops ---
+  "structlog>=24.4",           # structured JSON logs with correlation IDs
+  "psutil>=6",                 # host CPU/RAM/disk metrics for the System tab
+  "python-dotenv>=1.0",
+  "PyYAML>=6",
+  "feedparser>=6.0",           # RSS/Atom news ingestion (free sources)
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3",
+  "pytest-asyncio>=0.25",
+  "pytest-cov>=6",
+  "ruff>=0.8",
+  "mypy>=1.13",
+  "types-PyYAML",
+]
+redis = ["redis>=5.2"]
+torch = ["torch>=2.5"]
+
+[project.scripts]
+kat-trader = "kat.engine.entrypoint:main"
+kat-api = "apps.api.main:main"
+
+[tool.setuptools]
+package-dir = { "" = "packages" }
+
+[tool.setuptools.packages.find]
+where = ["packages"]
+include = ["kat*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
+markers = [
+  "integration: requires a live database",
+  "network: requires network access to Kalshi",
+  "slow: long running",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+src = ["packages", "apps", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RUF"]
+ignore = ["E501", "B008", "RUF012"]
+
+[tool.mypy]
+python_version = "3.11"
+mypy_path = "packages"
+packages = ["kat"]
+ignore_missing_imports = true
+warn_redundant_casts = true
+warn_unused_ignores = false
+no_implicit_optional = true
+strict_equality = true
