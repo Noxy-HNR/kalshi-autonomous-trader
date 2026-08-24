@@ -25,7 +25,18 @@ __all__ = [
     "isoformat",
     "parse_rfc3339",
     "to_ms",
+    "utcnow_aware",
 ]
+
+
+def utcnow_aware() -> datetime:
+    """Current wall-clock time as an aware UTC datetime.
+
+    Only for records *about* the system (audit rows, halt timestamps). Anything
+    that affects a trading decision must read a :class:`Clock` instead, so that
+    a backtest cannot see real time.
+    """
+    return datetime.now(UTC)
 
 
 class Clock(ABC):
