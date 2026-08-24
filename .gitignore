@@ -52,3 +52,6 @@ mlruns/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# local database password written by setup
+.db_password

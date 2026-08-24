@@ -20,7 +20,11 @@ from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import Field, ValidationInfo, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
 
 from kat.common.enums import OperatingMode, TradingEnvironment
 from kat.common.errors import ConfigError
@@ -390,6 +394,31 @@ class AppSettings(BaseSettings):
         extra="ignore",
     )
 
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Precedence, highest first: init kwargs, env vars, .env, YAML.
+
+        YAML sits *below* the environment deliberately. The YAML file is checked
+        into the repository and holds shared defaults; the environment holds
+        machine-specific values and secrets. If YAML won, a committed default
+        would silently override the operator's real database URL -- which is
+        exactly the bug this ordering exists to prevent.
+        """
+        return (
+            init_settings,
+            env_settings,
+            dotenv_settings,
+            file_secret_settings,
+            YamlSettingsSource(settings_cls),
+        )
+
     @field_validator("environment", mode="after")
     @classmethod
     def _propagate_env(cls, v: TradingEnvironment, info: ValidationInfo) -> TradingEnvironment:
@@ -458,6 +487,42 @@ def _mask_url(url: str) -> str:
     return f"{scheme}://****@{host}"
 
 
+class YamlSettingsSource(PydanticBaseSettingsSource):
+    """Lowest-priority settings source backed by ``configs/default.yaml``.
+
+    The path is overridable with ``KAT_CONFIG_FILE`` so an operator can keep a
+    machine-specific config outside the repository. A missing file is not an
+    error -- the model defaults are a complete, safe configuration on their own.
+    """
+
+    def __init__(self, settings_cls: type[BaseSettings]) -> None:
+        super().__init__(settings_cls)
+        self._data = self._read()
+
+    @staticmethod
+    def _read() -> dict[str, Any]:
+        config_file = os.environ.get(
+            "KAT_CONFIG_FILE", str(REPO_ROOT / "configs" / "default.yaml")
+        )
+        path = Path(config_file)
+        if not path.exists():
+            return {}
+        import yaml
+
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        if not isinstance(loaded, dict):
+            raise ConfigError(f"{path} must contain a YAML mapping at the top level")
+        return loaded
+
+    def get_field_value(self, field: Any, field_name: str) -> tuple[Any, str, bool]:
+        if field_name in self._data:
+            return self._data[field_name], field_name, False
+        return None, field_name, False
+
+    def __call__(self) -> dict[str, Any]:
+        return self._data
+
+
 _settings: AppSettings | None = None
 
 
@@ -465,27 +530,12 @@ def get_settings() -> AppSettings:
     """Process-wide settings singleton."""
     global _settings
     if _settings is None:
-        _settings = _load()
+        _settings = AppSettings()
     return _settings
 
 
 def reload_settings() -> AppSettings:
     """Re-read configuration. Used by tests and by the dashboard's reload action."""
     global _settings
-    _settings = _load()
+    _settings = AppSettings()
     return _settings
-
-
-def _load() -> AppSettings:
-    """Build settings from YAML defaults overlaid by env vars."""
-    base: dict[str, Any] = {}
-    config_file = os.environ.get("KAT_CONFIG_FILE", str(REPO_ROOT / "configs" / "default.yaml"))
-    path = Path(config_file)
-    if path.exists():
-        import yaml
-
-        loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        if not isinstance(loaded, dict):
-            raise ConfigError(f"{path} must contain a YAML mapping at the top level")
-        base = loaded
-    return AppSettings(**base)
