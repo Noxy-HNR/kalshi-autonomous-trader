@@ -86,9 +86,11 @@ variables the engine itself reads -- `KAT_API_HOST` and `KAT_API_PORT` -- so a
 changed port takes effect on both sides from one setting. `KAT_API_URL`
 overrides it outright, for the case where the engine genuinely runs elsewhere.
 
-Note that `rewrites()` is evaluated when the Next.js server starts, not at build
-time, so the variables must be present in the environment that runs
-`next start` (or `next dev`), not only the one that ran `next build`.
+Proxying is done by a route handler (`app/api/[...path]/route.ts`) rather than a
+`rewrites()` entry, because Next.js resolves rewrites at **build** time and
+freezes them into the route manifest -- which would make the engine's origin a
+property of whoever ran `next build`. The handler reads the environment on each
+request, so the variables need only be present where `next start` runs.
 
 ---
 
