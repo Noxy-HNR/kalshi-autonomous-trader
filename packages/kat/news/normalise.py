@@ -147,6 +147,21 @@ def simhash_distance(left: int, right: int) -> int:
     return ((left ^ right).bit_count()) if left and right else 64
 
 
+#: How far ahead of ingestion a claimed publication time may sit before the item
+#: is marked SUSPECT.
+#:
+#: A story cannot be published after we receive it, so in principle any positive
+#: gap is wrong. The tolerance covers ordinary clock skew between us and the
+#: publisher, and nothing more -- an hour of slack would have missed the case
+#: that prompted this: ESPN stamps its August items ``EST`` when US Eastern is
+#: on ``EDT``, which places every one of them 59 minutes in the future. Parsing
+#: them as written is correct; believing them is not.
+#:
+#: Nothing downstream trades on ``published_ms`` in any case -- freshness,
+#: decay and backtest filtering all read ``ingested_ms`` -- so this flag is a
+#: data-quality signal rather than a safety mechanism.
+_FUTURE_TOLERANCE_MS = 60_000
+
 def normalise(item: RawItem, clock: Clock) -> Article | None:
     """Build an :class:`Article`, or ``None`` if the item carries no usable text.
 
@@ -176,10 +191,9 @@ def normalise(item: RawItem, clock: Clock) -> Article | None:
         # No claimed publication time. Usable, but flagged: the freshness signal
         # a strategy reads is weaker for it.
         quality = DataQuality.PARTIAL
-    elif item.published_ms > ingested_ms + 3_600_000:
-        # Claimed to be published more than an hour in the future. A clock or
-        # timezone bug at the source; the item is kept and marked rather than
-        # trusted.
+    elif item.published_ms > ingested_ms + _FUTURE_TOLERANCE_MS:
+        # Claimed to be published after we received it, which is impossible.
+        # The item is kept and marked rather than trusted or discarded.
         quality = DataQuality.SUSPECT
         log.warning(
             "news.future_publication_time",

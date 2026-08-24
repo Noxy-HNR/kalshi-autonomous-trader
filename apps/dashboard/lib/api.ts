@@ -409,13 +409,28 @@ export function pct(value: string | number | null | undefined, digits = 2): stri
   return `${(n * 100).toFixed(digits)}%`;
 }
 
+function magnitude(seconds: number): string {
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+  if (seconds < 86400) return `${Math.round(seconds / 3600)}h`;
+  return `${Math.round(seconds / 86400)}d`;
+}
+
+/**
+ * Elapsed time, which says so when a timestamp is in the future.
+ *
+ * Clamping a negative elapsed time to zero renders a future timestamp as
+ * "0s ago", indistinguishable from "just now", and hides a real data fault.
+ * ESPN, for instance, stamps its August items `EST` when US Eastern is on
+ * `EDT`, so every one of them arrives 59 minutes ahead of the moment it was
+ * received. That is worth seeing rather than smoothing away.
+ */
 export function timeAgo(iso: string | null | undefined): string {
   if (!iso) return "--";
   const then = new Date(iso).getTime();
   if (!Number.isFinite(then)) return "--";
-  const seconds = Math.max(0, (Date.now() - then) / 1000);
-  if (seconds < 60) return `${Math.round(seconds)}s ago`;
-  if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
-  if (seconds < 86400) return `${Math.round(seconds / 3600)}h ago`;
-  return `${Math.round(seconds / 86400)}d ago`;
+  const seconds = (Date.now() - then) / 1000;
+  // A second or two either way is clock skew, not a fault.
+  if (seconds < -2) return `${magnitude(-seconds)} ahead`;
+  return `${magnitude(Math.max(0, seconds))} ago`;
 }

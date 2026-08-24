@@ -469,3 +469,42 @@ class TestInterleave:
     def test_degenerate_inputs(self):
         assert _interleave([], 5) == []
         assert _interleave([[1, 2]], 0) == []
+
+
+class TestFuturePublicationTimes:
+    """A story cannot be published after we receive it.
+
+    The case that motivated the tolerance: ESPN stamps its August items ``EST``
+    when US Eastern is on ``EDT``, placing every one of them 59 minutes in the
+    future. A one-hour threshold missed all of them by a minute.
+    """
+
+    def test_an_hour_ahead_is_flagged(self):
+        a = article(
+            "Browns name their starting quarterback for the season",
+            now_ms=10_000_000,
+            published_ms=10_000_000 + 59 * 60_000,
+        )
+        assert a.quality is DataQuality.SUSPECT
+
+    def test_ordinary_clock_skew_is_tolerated(self):
+        a = article(
+            "Senate confirms nominee to the federal bench",
+            now_ms=10_000_000,
+            published_ms=10_000_000 + 5_000,
+        )
+        assert a.quality is DataQuality.OK
+
+    def test_a_lying_publication_time_cannot_affect_freshness(self):
+        """The safety property: nothing downstream reads published_ms.
+
+        Freshness, decay and backtest filtering all measure from ingestion, so a
+        source an hour ahead of itself changes a data-quality flag and nothing
+        that touches a trading decision.
+        """
+        honest = article("Fed holds rates steady this month", now_ms=5_000_000,
+                         published_ms=5_000_000 - 60_000)
+        lying = article("Fed holds rates steady this month", now_ms=5_000_000,
+                        published_ms=5_000_000 + 59 * 60_000, source="src_b")
+        assert honest.age_ms(6_000_000) == lying.age_ms(6_000_000)
+        assert freshness(honest, 6_000_000) == freshness(lying, 6_000_000)
