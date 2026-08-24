@@ -28,7 +28,7 @@ import asyncio
 import sys
 from typing import Any
 
-from kat.common.enums import MarketType, TradingEnvironment
+from kat.common.enums import MarketType, StrategyState, TradingEnvironment
 from kat.common.errors import ConfigError
 from kat.common.timeutil import SystemClock
 from kat.config.settings import AppSettings, get_settings
@@ -55,6 +55,7 @@ from kat.observability.logging import configure_logging, get_logger
 from kat.risk.event_risk import EventAccountState, EventRiskEngine
 from kat.risk.invariants import MAX_PERP_LEVERAGE, assert_invariant_intact
 from kat.risk.perp_risk import PerpAccountState, PerpRiskEngine
+from kat.strategies.registry import StrategyRegistry, build_default_strategies
 
 log = get_logger(__name__)
 
@@ -261,6 +262,26 @@ class Platform:
                 equity_is_known=True,
                 updated_at_ms=now_ms,
             )
+
+        # Register the shipped strategies at PAPER: they trade with simulated
+        # fills against live market data, which is the lowest rung that produces
+        # evidence. Nothing here has earned live capital, and nothing reaches it
+        # without climbing the ladder.
+        registry = StrategyRegistry(writer)
+        for strategy in build_default_strategies(state=StrategyState.PAPER):
+            registry.register(strategy)
+            loop = event_loop if strategy.market_type is MarketType.EVENT else perp_loop
+            loop.add_strategy(strategy)
+        self.context.strategy_registry = registry
+        log.info(
+            "strategies.loaded",
+            total=len(registry),
+            # Not `event=`: structlog's own first parameter is named `event`, so
+            # passing it as a keyword collides with the message itself.
+            event_contracts=len(registry.all(market_type=MarketType.EVENT)),
+            perps=len(registry.all(market_type=MarketType.PERP)),
+            state=StrategyState.PAPER.value,
+        )
 
         self.context.loops = {MarketType.EVENT: event_loop, MarketType.PERP: perp_loop}
         self.context.reconciler = Reconciler(
