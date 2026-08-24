@@ -72,6 +72,7 @@ __all__ = [
     "EventProposal",
     "PerpProposal",
     "RoundTrip",
+    "conservative_funding_rate",
     "data_age_ms",
     "floor_contracts_qc",
     "headroom_qc",
@@ -368,6 +369,26 @@ def perp_round_trip(
     if entry is None or exit_leg is None:
         return None
     return RoundTrip(entry=entry, exit_leg=exit_leg)
+
+
+def conservative_funding_rate(
+    rate_bps_per_hour: float | None, *, is_long: bool, persistence: float
+) -> float:
+    """Discount a funding rate we would *receive*; leave one we would pay alone.
+
+    Kalshi's sign convention is that a positive rate means longs pay shorts, so
+    which side of the payment we are on depends on the direction of the trade.
+    The rate is a snapshot and it moves; assuming it persists is optimistic when
+    it is income and pessimistic when it is a cost, so the discount is applied
+    to income only. Applying it symmetrically would quietly shrink a cost, which
+    is the same error in the other direction.
+    """
+    if rate_bps_per_hour is None or rate_bps_per_hour == 0.0:
+        return 0.0
+    receiving = (rate_bps_per_hour > 0.0) != is_long
+    if not receiving:
+        return rate_bps_per_hour
+    return rate_bps_per_hour * min(1.0, max(0.0, persistence))
 
 
 @dataclass(frozen=True, slots=True)

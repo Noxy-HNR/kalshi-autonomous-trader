@@ -24,7 +24,28 @@ from kat.observability.metrics import M_MARKET_DATA_AGE_MS, metrics
 
 log = get_logger(__name__)
 
-__all__ = ["MarketSnapshot", "MarketState"]
+__all__ = ["MarketSnapshot", "MarketState", "funding_rate_bps_per_hour"]
+
+
+def funding_rate_bps_per_hour(
+    rate: float | None, interval_hours: float = 1.0
+) -> float | None:
+    """Convert a raw Kalshi funding rate into basis points per hour.
+
+    The raw rate is a fraction charged over one funding interval, so the
+    conversion is ``rate * 10_000 / interval_hours``. This function is the only
+    place that conversion is performed: a funding rate that means one thing in
+    the strategy and another in the risk engine is a silent, expensive bug, and
+    the fix is to have exactly one definition of the units.
+
+    Returns ``None`` when the rate is unknown, which callers must treat as
+    "no funding information" rather than as a rate of zero.
+    """
+    if rate is None:
+        return None
+    if interval_hours <= 0:
+        return None
+    return rate * 10_000.0 / interval_hours
 
 
 @dataclass(slots=True)
@@ -46,9 +67,26 @@ class MarketSnapshot:
     book_updated_ms: int = 0
     trade_updated_ms: int = 0
 
-    # Funding, for perpetuals.
+    # --- Funding, for perpetuals -------------------------------------------
+    #
+    # UNITS MATTER HERE AND ARE EASY TO GET WRONG.
+    #
+    # ``funding_rate`` is the **raw rate exactly as Kalshi publishes it**: a
+    # signed fraction charged over one funding interval. 0.0001 means one basis
+    # point per interval, not per hour and not annualised. It is stored raw
+    # rather than pre-converted because a derived value in a shared field is how
+    # two modules end up disagreeing about what the number means -- which is
+    # precisely the bug this comment exists to prevent.
+    #
+    # Anything that wants a per-hour figure must call
+    # :func:`funding_rate_bps_per_hour`, which is the single place the
+    # conversion happens.
     funding_rate: float | None = None
     next_funding_ms: int | None = None
+    #: Length of one funding interval in hours. Kalshi's perpetuals settle
+    #: funding on a fixed schedule; the default reflects the common 1-hour
+    #: interval and is overridden from market metadata when available.
+    funding_interval_hours: float = 1.0
 
     metadata: dict[str, Any] = field(default_factory=dict)
 

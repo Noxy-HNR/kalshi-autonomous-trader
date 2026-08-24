@@ -1,0 +1,316 @@
+"""The read model the dashboard sees.
+
+The dashboard API runs **in the same process** as the trading engine rather than
+as a separate service. That is a deliberate simplification: the data it needs is
+the engine's own in-memory state, and putting a process boundary in the middle
+would mean either polling the database (stale, and it puts the database back on
+a path we removed it from) or inventing an IPC layer for one consumer.
+
+What this module provides is a single object the API can read and the engine can
+populate. It holds *references*, not copies, so a dashboard request sees live
+state with no synchronisation step.
+
+The one rule
+------------
+**Everything here is read-only from the API's perspective, except for the
+explicitly enumerated control actions.** Those actions -- mode changes, kill
+switches, pause/resume, emergency flatten, enabling a strategy -- go through the
+same code paths as everything else. In particular:
+
+* Emergency flatten constructs an ``OrderIntent`` and routes it through the risk
+  engine. It is not exempt from evaluation; the risk engine simply recognises it
+  as exposure-reducing and approves it.
+* There is no control that raises a risk limit beyond its backend clamp, and
+  none at all that touches perpetual leverage -- no such field or endpoint
+  exists.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
+
+from kat.common.enums import KillSwitchScope, MarketType, OperatingMode
+from kat.common.fixedpoint import micros_to_decimal
+from kat.observability.logging import get_logger
+from kat.observability.metrics import metrics
+from kat.risk.invariants import MAX_PERP_LEVERAGE
+
+if TYPE_CHECKING:
+    from kat.engine.lifecycle import Application
+    from kat.engine.trading import TradingLoop
+    from kat.execution.reconcile import Reconciler
+    from kat.marketdata.state import MarketState
+
+log = get_logger(__name__)
+
+__all__ = ["EngineContext", "get_context", "set_context"]
+
+
+@dataclass
+class EngineContext:
+    """Live references to everything the dashboard reads."""
+
+    app: Application | None = None
+    loops: dict[MarketType, TradingLoop] = field(default_factory=dict)
+    market_states: dict[MarketType, MarketState] = field(default_factory=dict)
+    reconciler: Reconciler | None = None
+
+    #: Subsystems that may be absent (perps not enabled, LLM disabled, etc.).
+    strategy_registry: Any = None
+    model_registry: Any = None
+    arbitrage_scanner: Any = None
+    news_pipeline: Any = None
+    research_loop: Any = None
+    portfolio_manager: Any = None
+
+    # -- status --------------------------------------------------------------
+
+    def overview(self) -> dict[str, Any]:
+        """The Overview tab: equity, P&L, exposure, health, at a glance."""
+        event = self._domain_summary(MarketType.EVENT)
+        perp = self._domain_summary(MarketType.PERP)
+        total_equity = (event.get("equity_micros") or 0) + (perp.get("equity_micros") or 0)
+        return {
+            "environment": self.app.settings.environment.value if self.app else "unknown",
+            "operating_mode": self.app.settings.operating_mode.value if self.app else "unknown",
+            "live_armed": self.app.settings.live_trading_armed if self.app else False,
+            "can_submit_real_orders": self.app.can_submit_real_orders if self.app else False,
+            "trading_permitted": self.app.trading_permitted if self.app else False,
+            "phase": self.app.phase.value if self.app else "unknown",
+            "total_equity_usd": str(micros_to_decimal(total_equity)),
+            "event": event,
+            "perp": perp,
+            "health": self.health(),
+        }
+
+    def _domain_summary(self, market_type: MarketType) -> dict[str, Any]:
+        loop = self.loops.get(market_type)
+        if loop is None:
+            return {"available": False}
+        state = loop.account_state
+        summary: dict[str, Any] = {
+            "available": True,
+            "strategies_active": len(loop.active_strategies()),
+            "strategies_registered": len(loop.strategies),
+            "markets_watched": len(loop.market_state),
+            "open_orders": len(loop.execution.working_orders()),
+            "cycles": loop.cycles,
+            "last_cycle": loop.last_cycle.to_dict() if loop.last_cycle else None,
+        }
+        if state is None:
+            summary["equity_micros"] = 0
+            return summary
+
+        if market_type is MarketType.EVENT:
+            summary.update(
+                equity_micros=state.equity_micros,
+                equity_usd=str(micros_to_decimal(state.equity_micros)),
+                balance_usd=str(micros_to_decimal(state.balance_micros)),
+                exposure_usd=str(micros_to_decimal(state.total_exposure_micros())),
+                open_positions=sum(1 for p in state.positions.values() if p.position_qc != 0),
+                realized_pnl_today_usd=str(
+                    micros_to_decimal(state.realized_pnl_today_micros)
+                ),
+                drawdown_pct=str(state.drawdown_pct()),
+            )
+        else:
+            leverage = state.effective_leverage()
+            summary.update(
+                equity_micros=state.equity_micros,
+                equity_usd=str(micros_to_decimal(state.equity_micros)),
+                equity_source=state.equity_source,
+                equity_is_known=state.equity_is_known,
+                exposure_usd=str(micros_to_decimal(state.effective_exposure_micros())),
+                pending_exposure_usd=str(
+                    micros_to_decimal(state.total_pending_exposure_micros())
+                ),
+                # The three numbers the Perpetuals tab must make unmissable.
+                effective_leverage=f"{leverage:.6f}" if leverage is not None else None,
+                max_leverage=f"{MAX_PERP_LEVERAGE:.2f}",
+                exchange_account_leverage=state.exchange_account_leverage,
+                open_positions=sum(1 for p in state.positions.values() if p.position_qc != 0),
+                realized_pnl_today_usd=str(
+                    micros_to_decimal(state.realized_pnl_today_micros)
+                ),
+            )
+        return summary
+
+    def leverage_panel(self) -> dict[str, Any]:
+        """The Perpetuals tab's leverage panel.
+
+        Includes the projected leverage for every working order, so an operator
+        can see not only where exposure is but where it would be if everything
+        resting filled.
+        """
+        loop = self.loops.get(MarketType.PERP)
+        state = loop.account_state if loop else None
+        if state is None:
+            return {
+                "available": False,
+                "max_leverage": f"{MAX_PERP_LEVERAGE:.2f}",
+                "note": "perpetual account state is not available",
+            }
+
+        current = state.effective_exposure_micros()
+        pending = state.total_pending_exposure_micros()
+        equity = state.equity_micros
+
+        def ratio(value: int) -> str | None:
+            if not state.equity_is_known or equity <= 0:
+                return None
+            from decimal import Decimal
+
+            return f"{Decimal(value) / Decimal(equity):.6f}"
+
+        return {
+            "available": True,
+            "max_leverage": f"{MAX_PERP_LEVERAGE:.2f}",
+            "equity_usd": str(micros_to_decimal(equity)),
+            "equity_source": state.equity_source,
+            "equity_is_known": state.equity_is_known,
+            "current_exposure_usd": str(micros_to_decimal(current)),
+            "pending_exposure_usd": str(micros_to_decimal(pending)),
+            "current_leverage": ratio(current),
+            "projected_leverage": ratio(current + pending),
+            "headroom_usd": str(micros_to_decimal(max(0, equity - current - pending))),
+            "exchange_account_leverage": state.exchange_account_leverage,
+            "exchange_leverage_note": (
+                "Kalshi's account_leverage is notional / maintenance-margin, not "
+                "notional / equity. It is shown for cross-checking only and is "
+                "never used as the limit."
+            ),
+            "blocked_violations": metrics.get_counter("risk.leverage_blocks"),
+        }
+
+    def health(self) -> dict[str, Any]:
+        if self.app is None:
+            return {"status": "not_started"}
+        status = self.app.status()
+        return {
+            "phase": status["phase"],
+            "trading_permitted": status["trading_permitted"],
+            "database": status["database_healthy"],
+            "components": status["components"],
+            "kill_switches": status["kill_switches"],
+            "writer": status["writer"],
+        }
+
+    def system(self) -> dict[str, Any]:
+        """The System tab: process, queues, latency, data freshness."""
+        import psutil
+
+        process = psutil.Process()
+        with process.oneshot():
+            mem = process.memory_info()
+            cpu = process.cpu_percent(interval=None)
+        disk = psutil.disk_usage(".")
+
+        now_ms = self.app.clock.now_ms() if self.app else 0
+        return {
+            "process": {
+                "cpu_pct": cpu,
+                "rss_mb": round(mem.rss / 1_048_576, 1),
+                "threads": process.num_threads(),
+                "open_files": _safe(lambda: len(process.open_files())),
+                "connections": _safe(lambda: len(process.net_connections())),
+            },
+            "host": {
+                "cpu_pct": psutil.cpu_percent(interval=None),
+                "ram_pct": psutil.virtual_memory().percent,
+                "disk_free_gb": round(disk.free / 1_073_741_824, 1),
+                "disk_pct": disk.percent,
+            },
+            "market_data": {
+                domain.value: state.stats(now_ms=now_ms)
+                for domain, state in self.market_states.items()
+            },
+            "metrics": metrics.snapshot(),
+            "app": self.app.status() if self.app else None,
+        }
+
+    # -- control actions -----------------------------------------------------
+
+    async def set_operating_mode(self, mode: OperatingMode, *, actor: str = "dashboard") -> None:
+        """Change autonomy mode. Never affects any risk limit."""
+        if self.app is None:
+            raise RuntimeError("application is not running")
+        previous = self.app.settings.operating_mode
+        object.__setattr__(self.app.settings, "operating_mode", mode)
+        for loop in self.loops.values():
+            loop.operating_mode = mode
+        log.warning(
+            "control.operating_mode_changed",
+            actor=actor, previous=previous.value, mode=mode.value,
+        )
+        self.app._audit(
+            "operating_mode_changed",
+            subject="application",
+            detail={"from": previous.value, "to": mode.value, "actor": actor},
+            severity="warning",
+        )
+
+    async def engage_kill_switch(
+        self, scope: KillSwitchScope, *, reason: str, actor: str = "dashboard", subject: str = ""
+    ) -> None:
+        if self.app is None:
+            raise RuntimeError("application is not running")
+        await self.app.kill_switches.engage(
+            scope.value, reason=reason, actor=actor, subject=subject
+        )
+
+    async def release_kill_switch(
+        self, scope: KillSwitchScope, *, actor: str = "dashboard", subject: str = ""
+    ) -> None:
+        if self.app is None:
+            raise RuntimeError("application is not running")
+        await self.app.kill_switches.release(scope.value, actor=actor, subject=subject)
+
+    async def pause_trading(self, *, actor: str = "dashboard") -> None:
+        await self.engage_kill_switch(
+            KillSwitchScope.GLOBAL, reason="paused from dashboard", actor=actor
+        )
+
+    async def resume_trading(self, *, actor: str = "dashboard") -> None:
+        await self.release_kill_switch(KillSwitchScope.GLOBAL, actor=actor)
+
+    async def cancel_all_orders(self, market_type: MarketType | None = None) -> int:
+        """Cancel working orders. Reduces risk, so it is always permitted."""
+        total = 0
+        for domain, loop in self.loops.items():
+            if market_type is None or domain is market_type:
+                total += await loop.execution.cancel_all()
+        log.warning("control.cancel_all", cancelled=total, domain=str(market_type))
+        return total
+
+    def snapshot(self) -> dict[str, Any]:
+        """Everything, for a single dashboard poll."""
+        return {
+            "overview": self.overview(),
+            "leverage": self.leverage_panel(),
+            "health": self.health(),
+        }
+
+
+def _safe(fn: Any) -> Any:
+    """Some psutil probes need privileges we deliberately do not have."""
+    try:
+        return fn()
+    except Exception:
+        return None
+
+
+_context: EngineContext | None = None
+
+
+def get_context() -> EngineContext:
+    """The process-wide context. Created empty so the API can start first."""
+    global _context
+    if _context is None:
+        _context = EngineContext()
+    return _context
+
+
+def set_context(context: EngineContext) -> None:
+    global _context
+    _context = context

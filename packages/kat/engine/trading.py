@@ -49,7 +49,7 @@ from kat.common.timeutil import Clock
 from kat.engine.decision import DecisionRecorder, TradeDecision
 from kat.execution.base import ExecutionEngine
 from kat.kalshi.fees import FeeSchedule, estimate_fee_micros
-from kat.marketdata.state import MarketState
+from kat.marketdata.state import MarketState, funding_rate_bps_per_hour
 from kat.observability.logging import get_logger
 from kat.observability.metrics import M_DECISION_LATENCY, M_RISK_LATENCY, metrics
 from kat.risk.killswitch import KillSwitchManager
@@ -438,13 +438,18 @@ class TradingLoop:
         """
         if self.market_type is MarketType.EVENT:
             return {"event_ticker": getattr(snapshot, "event_ticker", "") or ""}
-        funding = getattr(snapshot, "funding_rate", None)
-        if funding is None:
+        # The raw rate is a per-interval fraction; the risk engine works in
+        # basis points per hour. One shared helper owns that conversion so the
+        # strategy and the risk engine cannot disagree about the units.
+        bps_per_hour = funding_rate_bps_per_hour(
+            getattr(snapshot, "funding_rate", None),
+            getattr(snapshot, "funding_interval_hours", 1.0),
+        )
+        if bps_per_hour is None:
             return {}
         from decimal import Decimal
 
-        # Funding rates arrive as a per-interval fraction; express as bps/hour.
-        return {"funding_rate_bps_per_hour": Decimal(str(funding)) * 10_000}
+        return {"funding_rate_bps_per_hour": Decimal(str(bps_per_hour))}
 
     def stats(self) -> dict[str, Any]:
         return {

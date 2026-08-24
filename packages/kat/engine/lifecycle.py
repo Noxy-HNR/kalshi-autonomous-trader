@@ -273,9 +273,7 @@ class Application:
             return False
         if self.phase is not Phase.RUNNING:
             return False
-        if self.kill_switches.is_engaged(KillSwitchScope.GLOBAL):
-            return False
-        return True
+        return not self.kill_switches.is_engaged(KillSwitchScope.GLOBAL)
 
     @property
     def can_submit_real_orders(self) -> bool:
