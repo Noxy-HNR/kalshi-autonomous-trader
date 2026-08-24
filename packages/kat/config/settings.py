@@ -305,7 +305,7 @@ class NewsSettings(BaseSettings):
 
     enabled: bool = True
     poll_interval_s: int = Field(default=300, ge=30)
-    max_articles_per_poll: int = Field(default=200, ge=1)
+    max_articles_per_poll: int = Field(default=600, ge=1)
     feeds_file: str = "configs/news_sources.yaml"
     request_timeout_s: float = Field(default=15.0, ge=1.0, le=120.0)
     user_agent: str = "kalshi-autonomous-trader/0.1 (research)"

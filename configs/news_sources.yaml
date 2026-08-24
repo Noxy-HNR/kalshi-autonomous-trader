@@ -1,0 +1,222 @@
+# Free news sources. No paid API and no key is required to run this platform.
+#
+# reliability is a prior in [0, 1] on how much weight a story carries before any
+# evidence about the specific story. It is deliberately ordered by *what the
+# source is*, not by how much anyone likes it:
+#
+#   0.90-0.95  Primary sources that ARE the settlement authority for some Kalshi
+#              markets. When the Federal Reserve publishes an FOMC statement, the
+#              statement is not a report about the decision, it is the decision.
+#   0.70-0.80  Wires and public broadcasters with their own reporting desks.
+#   0.55-0.65  Outlets that report first-hand but with a house angle.
+#
+# Nothing here is trusted outright: kat.news.impact blends this prior with
+# observed corroboration across independent sources, so a low-reliability outlet
+# carrying a story that four others also carry ends up weighted on the
+# corroboration, not on the prior.
+#
+# Every URL below was fetched and confirmed to return parseable items before
+# being added. Feeds rot; kat.news.pipeline treats a dead source as a degraded
+# signal rather than an error, and reports it in the cycle stats.
+
+defaults:
+  kind: rss
+  enabled: true
+  min_interval_s: 120
+  timeout_s: 15
+  max_items: 60
+
+sources:
+  # -- Primary government sources -------------------------------------------
+  # These settle markets. Highest reliability on the list, and the only entries
+  # where a single report with no corroboration is worth acting on.
+
+  - id: fed_press
+    name: Federal Reserve Press Releases
+    url: https://www.federalreserve.gov/feeds/press_all.xml
+    reliability: 0.95
+    categories: [monetary_policy, economics, government]
+    min_interval_s: 180
+
+  - id: fed_monetary
+    name: Federal Reserve Monetary Policy
+    url: https://www.federalreserve.gov/feeds/press_monetary.xml
+    reliability: 0.95
+    categories: [monetary_policy, rates, fomc]
+    min_interval_s: 180
+
+  - id: sec_press
+    name: SEC Press Releases
+    url: https://www.sec.gov/news/pressreleases.rss
+    reliability: 0.92
+    categories: [regulation, legal, markets]
+    min_interval_s: 300
+    headers:
+      # The SEC asks automated clients to identify themselves.
+      User-Agent: kalshi-autonomous-trader research contact@example.invalid
+
+  - id: federal_register
+    name: Federal Register
+    url: https://www.federalregister.gov/api/v1/documents.json
+    kind: json
+    reliability: 0.93
+    categories: [regulation, legislation, government]
+    min_interval_s: 600
+    params:
+      per_page: "40"
+      order: newest
+    json:
+      items_path: results
+      published_format: date
+      fields:
+        external_id: document_number
+        title: title
+        summary: abstract
+        url: html_url
+        published: publication_date
+        categories: agencies.*.name
+
+  - id: nws_alerts
+    name: NWS Active Alerts
+    url: https://api.weather.gov/alerts/active
+    kind: json
+    reliability: 0.94
+    categories: [weather, disaster]
+    min_interval_s: 300
+    headers:
+      Accept: application/geo+json
+    params:
+      # The alerts endpoint rejects an unrecognised `limit`, so volume is
+      # controlled by severity instead. Severe and Extreme are the only
+      # tiers that move a weather market.
+      status: actual
+      severity: Severe,Extreme
+    json:
+      items_path: features
+      published_format: rfc3339
+      fields:
+        external_id: properties.id
+        title: properties.headline
+        summary: properties.description
+        url: id
+        published: properties.sent
+        categories: properties.event
+
+  - id: usgs_quakes
+    name: USGS Significant Earthquakes
+    url: https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_day.geojson
+    kind: json
+    reliability: 0.95
+    categories: [disaster, seismic]
+    min_interval_s: 300
+    json:
+      items_path: features
+      published_format: unix_ms
+      fields:
+        external_id: id
+        title: properties.title
+        summary: properties.place
+        url: properties.url
+        published: properties.time
+
+  # -- Wires and public broadcasters -----------------------------------------
+
+  - id: bbc_world
+    name: BBC World News
+    url: https://feeds.bbci.co.uk/news/world/rss.xml
+    reliability: 0.80
+    categories: [world, politics, conflict]
+
+  - id: bbc_business
+    name: BBC Business
+    url: https://feeds.bbci.co.uk/news/business/rss.xml
+    reliability: 0.80
+    categories: [business, economics, markets]
+
+  - id: npr_politics
+    name: NPR Politics
+    url: https://feeds.npr.org/1014/rss.xml
+    reliability: 0.76
+    categories: [politics, elections, government]
+
+  - id: npr_business
+    name: NPR Business
+    url: https://feeds.npr.org/1006/rss.xml
+    reliability: 0.76
+    categories: [business, economics]
+
+  - id: guardian_world
+    name: The Guardian World
+    url: https://www.theguardian.com/world/rss
+    reliability: 0.72
+    categories: [world, politics, conflict]
+
+  - id: guardian_us
+    name: The Guardian US
+    url: https://www.theguardian.com/us-news/rss
+    reliability: 0.72
+    categories: [politics, elections, us]
+
+  - id: aljazeera
+    name: Al Jazeera
+    url: https://www.aljazeera.com/xml/rss/all.xml
+    reliability: 0.68
+    categories: [world, conflict, diplomacy]
+
+  # -- Financial and market coverage -----------------------------------------
+
+  - id: cnbc_top
+    name: CNBC Top News
+    url: https://search.cnbc.com/rs/search/combinedcms/view.xml
+    reliability: 0.68
+    categories: [markets, business, economics]
+    params:
+      partnerId: wrss01
+      id: "100003114"
+
+  - id: cnbc_economy
+    name: CNBC Economy
+    url: https://search.cnbc.com/rs/search/combinedcms/view.xml
+    reliability: 0.68
+    categories: [economics, rates, inflation]
+    params:
+      partnerId: wrss01
+      id: "20910258"
+
+  - id: yahoo_finance
+    name: Yahoo Finance
+    url: https://finance.yahoo.com/news/rssindex
+    reliability: 0.60
+    categories: [markets, earnings, business]
+
+  # -- Politics ---------------------------------------------------------------
+  # Kalshi's political markets are among its most liquid, and these two are the
+  # fastest to report a primary result or a floor vote. Both carry a house
+  # angle, hence the lower prior.
+
+  - id: politico
+    name: Politico
+    url: https://rss.politico.com/politics-news.xml
+    reliability: 0.65
+    categories: [politics, elections, legislation]
+
+  - id: thehill
+    name: The Hill
+    url: https://thehill.com/news/feed/
+    reliability: 0.62
+    categories: [politics, legislation, government]
+
+  # -- Sport and space --------------------------------------------------------
+
+  - id: espn_top
+    name: ESPN Top Headlines
+    url: https://www.espn.com/espn/rss/news
+    reliability: 0.70
+    categories: [sports]
+
+  - id: nasa_news
+    name: NASA News Releases
+    url: https://www.nasa.gov/news-release/feed/
+    reliability: 0.90
+    categories: [space, launch, science]
+    min_interval_s: 600
