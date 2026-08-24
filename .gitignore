@@ -35,10 +35,14 @@ out/
 apps/dashboard/.env*.local
 
 # --- runtime state (machine-local, not source) ---
-logs/
-data/
-!data/.gitkeep
-!logs/.gitkeep
+# Anchored with a leading slash. A bare `data/` matches at ANY depth, which
+# silently excluded the source package packages/kat/data/ from the repository:
+# a fresh clone was missing a file the working tree had, and any module added
+# there would have been absent from every deployment without a single error.
+/logs/
+/data/
+!/data/.gitkeep
+!/logs/.gitkeep
 *.db
 *.sqlite
 *.sqlite3
