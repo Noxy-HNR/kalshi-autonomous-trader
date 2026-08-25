@@ -16,7 +16,7 @@
 
 import { useState } from "react";
 import { api, type ControlState } from "@/lib/api";
-import { ErrorBox, Help, Pill, usePoll } from "@/components/ui";
+import { ErrorBox, Help, Pill, docsLink, usePoll } from "@/components/ui";
 import { PAGE } from "@/lib/explainers";
 
 const SCOPE_HELP: Record<string, string> = {
@@ -91,7 +91,7 @@ export default function ControlsPage() {
             </div>
           </div>
 
-          <h2>Operating mode</h2>
+          <h2 {...docsLink("control-operating-mode")}>Operating mode</h2>
           <div className="card">
             <div className="row">
               {/* The list comes from the engine; an older or degraded response
@@ -153,7 +153,7 @@ export default function ControlsPage() {
             </div>
           </div>
 
-          <h2>Kill switches</h2>
+          <h2 {...docsLink("control-kill-switch")}>Kill switches</h2>
           <div className="card">
             <div className="row" style={{ marginBottom: 12 }}>
               <input

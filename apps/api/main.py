@@ -41,6 +41,7 @@ from kat.db.models import (
     Strategy,
     StrategyStateChange,
 )
+from kat.docs import build_docs
 from kat.engine.context import get_context
 from kat.observability.logging import get_logger
 from kat.risk.invariants import MAX_PERP_LEVERAGE
@@ -777,6 +778,19 @@ async def set_mode(request: ModeRequest) -> dict[str, Any]:
     """Change autonomy mode. Affects no risk limit."""
     await get_context().set_operating_mode(request.mode, actor=request.actor)
     return {"operating_mode": request.mode.value}
+
+
+@api.get("/docs")
+async def docs() -> dict[str, Any]:
+    """Every explanation the interface shows, with live values.
+
+    Served from the engine rather than baked into the dashboard so a limit's
+    documented value is the one actually in force, and so the wording cannot
+    drift between the tooltip, the limits table and the docs page.
+    """
+    ctx = get_context()
+    settings = ctx.app.settings if ctx.app else None
+    return build_docs(settings)
 
 
 @api.get("/risk/tunables")

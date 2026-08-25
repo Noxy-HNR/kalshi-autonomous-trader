@@ -62,6 +62,32 @@ export function PageIntro({
   );
 }
 
+/**
+ * Middle-click anything to open its reference entry.
+ *
+ * Returned as props to spread onto an element. Middle-click is used because it
+ * is otherwise dead on these controls, so the gesture costs nothing that
+ * already worked -- dragging a slider, pressing a button. `onAuxClick` fires
+ * for it; `onMouseDown` is also intercepted because the browser would
+ * otherwise start autoscroll on middle-press.
+ *
+ * The reference opens in a new tab. Someone reading about a limit usually wants
+ * to keep looking at the limit.
+ */
+export function docsLink(anchor: string) {
+  return {
+    title: "Middle-click for the full explanation",
+    onAuxClick: (e: React.MouseEvent) => {
+      if (e.button !== 1) return;
+      e.preventDefault();
+      window.open(`/docs#${anchor}`, "_blank", "noopener");
+    },
+    onMouseDown: (e: React.MouseEvent) => {
+      if (e.button === 1) e.preventDefault();
+    },
+  };
+}
+
 export function Stat({
   label,
   value,

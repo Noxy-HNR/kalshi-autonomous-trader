@@ -323,6 +323,9 @@ export interface Tunable {
   label: string;
   description: string;
   plain: string;
+  raising: string;
+  lowering: string;
+  example: string;
   kind: string;
   value: string;
   default: string;
@@ -331,6 +334,21 @@ export interface Tunable {
   step: string;
   higher_is_riskier: boolean;
   locked: boolean;
+}
+
+export interface DocEntry {
+  anchor: string;
+  term?: string;
+  field?: string;
+  short?: string;
+  body?: string;
+}
+
+export interface DocsModel {
+  concepts: DocEntry[];
+  tunables: (Tunable & { anchor: string })[];
+  risk_fields: DocEntry[];
+  controls: DocEntry[];
 }
 
 export interface TunableChange {
@@ -368,6 +386,7 @@ export const api = {
 
   riskEvents: () => get<{ events: RiskEventRow[] }>("/risk/events"),
   tunables: () => get<{ tunables: Tunable[] }>("/risk/tunables"),
+  docs: () => get<DocsModel>("/docs"),
   setTunable: (key: string, value: string, actor = "dashboard") =>
     post<TunableChange>("/risk/tunables", { key, value, actor }),
   riskLimits: () => get<Record<string, unknown>>("/risk/limits"),

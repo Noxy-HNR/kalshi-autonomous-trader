@@ -79,6 +79,14 @@ class Tunable:
     #: not assume any term: "spread", "edge", "drawdown" and "notional" all
     #: have to be explained where they are used, not looked up elsewhere.
     plain: str = ""
+    #: What raising this buys you, and what it costs. Shown in the docs page as
+    #: the case *for* a larger number, stated fairly -- every one of these is a
+    #: real trade-off rather than a setting with a right answer.
+    raising: str = ""
+    #: The same for lowering it.
+    lowering: str = ""
+    #: A concrete worked example, in dollars and cents on a small account.
+    example: str = ""
     #: Overrides the per-unit default in _STEP_BY_KIND. Left unset almost
     #: always: an inconsistent step is what made these feel arbitrary.
     step_override: Decimal | None = None
@@ -131,6 +139,9 @@ class Tunable:
             "label": self.label,
             "description": self.description,
             "plain": self.plain,
+            "raising": self.raising,
+            "lowering": self.lowering,
+            "example": self.example,
             "kind": self.kind,
             "value": str(self.read(settings)),
             "minimum": str(self.minimum),
@@ -191,6 +202,25 @@ TUNABLES: tuple[Tunable, ...] = (
             "where that starting hole is deeper. It does not make those trades "
             "better; it makes the platform willing to take them."
         ),
+        raising=(
+            "Lets the platform trade markets where the buying and selling prices sit "
+            "further apart. You get access to far more markets, because most markets "
+            "are not tightly priced. The cost is that you start every one of those "
+            "trades further behind: the gap is paid twice, once getting in and once "
+            "getting out, before any profit is possible."
+        ),
+        lowering=(
+            "Restricts trading to tightly-priced markets only. Every trade starts "
+            "closer to break-even and needs a smaller move to become profitable. The "
+            "cost is that the platform will often find nothing worth trading and sit "
+            "idle, which feels like it is broken but is usually the correct answer."
+        ),
+        example=(
+            "At the 3 cent default, buying a contract at 40 cents means you could "
+            "only sell it back for about 37 cents immediately. You are 3 cents down "
+            "before anything happens. Raise this to 10 cents and you would be 10 "
+            "cents down instead, needing a much bigger move just to break even."
+        ),
         kind="cents",
         minimum=_d("50"),
         maximum=_d("2000"),
@@ -210,6 +240,23 @@ TUNABLES: tuple[Tunable, ...] = (
             "nobody is offering to trade, you can usually get IN at a fair price but "
             "not back OUT -- there is nobody on the other side when you want to sell. "
             "Lower this and the platform will enter markets it may struggle to leave."
+        ),
+        raising=(
+            "Requires more contracts to be waiting before the platform will enter. "
+            "Fewer markets qualify, but you are much more likely to be able to sell "
+            "when you want to."
+        ),
+        lowering=(
+            "Admits thinner markets where few people are trading. More opportunities, "
+            "but you may not be able to get out at a sensible price. Being unable to "
+            "exit is worse than never entering: a position you cannot close is one "
+            "that decides its own outcome."
+        ),
+        example=(
+            "At the 10 contract default, if you buy 5 contracts there is roughly "
+            "enough interest for you to sell them back. Drop it to 1 contract and you "
+            "might buy 5 and find only 1 buyer waiting, leaving you holding 4 you "
+            "cannot sell."
         ),
         kind="contracts",
         minimum=_d("100"),
@@ -233,6 +280,22 @@ TUNABLES: tuple[Tunable, ...] = (
             "Lower it and it trades more often on smaller, less certain mispricings, "
             "where being slightly wrong wipes out the gain."
         ),
+        raising=(
+            "Demands a bigger mispricing before acting. Fewer trades, but each has "
+            "more room for the platform's estimate of fair value to be somewhat wrong "
+            "and still come out ahead."
+        ),
+        lowering=(
+            "Acts on smaller mispricings. Many more trades, but each has a thinner "
+            "margin. Since the estimate of fair value is itself uncertain, a small "
+            "edge can easily be no edge at all once fees are paid."
+        ),
+        example=(
+            "At the 2 cent default, if the platform thinks a contract is worth 45 "
+            "cents it will only buy below 43. Lower it to 0.5 cents and it would buy "
+            "at 44.5, where being half a cent wrong about fair value wipes out the "
+            "entire trade."
+        ),
         kind="cents",
         minimum=_d("20"),
         maximum=_d("1000"),
@@ -252,6 +315,21 @@ TUNABLES: tuple[Tunable, ...] = (
             "move. Slippage is how much worse than expected you ended up paying. This "
             "is how much of that the platform will tolerate before giving up on the "
             "order instead of chasing a price that is running away."
+        ),
+        raising=(
+            "Tolerates the price moving further against you between deciding and "
+            "filling. More orders complete, but some complete at prices you would not "
+            "have chosen."
+        ),
+        lowering=(
+            "Abandons an order as soon as the price moves. You never overpay, but in "
+            "a fast market you may get almost nothing filled, which can leave you "
+            "half in a position you wanted fully."
+        ),
+        example=(
+            "At the 1 cent default, an order to buy at 40 cents is abandoned if the "
+            "price runs to 41 before it fills. That protects you from chasing, but if "
+            "news is moving the market you will miss it."
         ),
         kind="cents",
         minimum=_d("0"),
@@ -275,6 +353,23 @@ TUNABLES: tuple[Tunable, ...] = (
             "the single most important control against being wrong about one thing in "
             "a big way."
         ),
+        raising=(
+            "Allows more of the account into a single market. When the platform is "
+            "right it wins more; when it is wrong about one thing it loses much more. "
+            "This is concentration, and concentration cuts both ways with perfect "
+            "symmetry."
+        ),
+        lowering=(
+            "Spreads the account across more markets, so no single one can hurt "
+            "badly. The cost is that a genuinely good opportunity is capped, and each "
+            "small position still pays the full spread both ways, so many tiny trades "
+            "bleed fees."
+        ),
+        example=(
+            "On a 200 dollar account at the 10 percent default, one market can hold "
+            "20 dollars. Raise it to 25 percent and one market holds 50 dollars, so "
+            "four bad markets could account for the whole balance."
+        ),
         kind="percent",
         minimum=_d("0.001"),
         maximum=_d("0.25"),
@@ -294,6 +389,22 @@ TUNABLES: tuple[Tunable, ...] = (
             "every market together. The rest stays as cash. That cash is not idle -- "
             "it is what lets positions move against you for a while without forcing "
             "you to sell at the worst moment."
+        ),
+        raising=(
+            "Puts more of the account to work at once. More of your money is deployed "
+            "rather than idle. The cost is a smaller cash buffer, so a broad move "
+            "against you leaves less room before positions must be closed at bad "
+            "prices."
+        ),
+        lowering=(
+            "Keeps more of the account in cash. That cash is what lets positions move "
+            "against you for a while without forcing a sale at the worst moment. The "
+            "cost is that the account works less hard."
+        ),
+        example=(
+            "On 200 dollars at the 60 percent default, up to 120 dollars is deployed "
+            "and 80 stays as cash. At 95 percent only 10 dollars is left, so a modest "
+            "adverse move across several positions leaves almost no cushion."
         ),
         kind="percent",
         minimum=_d("0.01"),
@@ -315,6 +426,20 @@ TUNABLES: tuple[Tunable, ...] = (
             "percentage of a wrong number is still a wrong number, and this catches "
             "it."
         ),
+        raising=(
+            "Permits larger individual orders. Useful as the account grows, since "
+            "otherwise the percentage limits would be the only constraint."
+        ),
+        lowering=(
+            "Caps any single order in plain dollars regardless of what the "
+            "percentages allow. This is the backstop for the case where the account "
+            "balance is misread: a percentage of a wrong number is still a wrong "
+            "number, and this catches it."
+        ),
+        example=(
+            "At the 25 dollar default, even if a bug reported your balance as one "
+            "million dollars, no single order could exceed 25 dollars."
+        ),
         kind="usd",
         minimum=_d("1"),
         maximum=_d("500"),
@@ -333,6 +458,21 @@ TUNABLES: tuple[Tunable, ...] = (
             "How much of the account a single trade is allowed to lose before it is "
             "closed. Think of it as the size of the individual mistakes you are "
             "willing to make."
+        ),
+        raising=(
+            "Gives each trade more room to go against you before being closed. Fewer "
+            "positions are cut early and then recover without you. The cost is that "
+            "each individual mistake is larger."
+        ),
+        lowering=(
+            "Cuts losing trades sooner. Individual mistakes stay small, but positions "
+            "that would have recovered get closed at the bottom. Being stopped out "
+            "repeatedly in a choppy market is its own way to lose money."
+        ),
+        example=(
+            "On 200 dollars at the 2 percent default, a trade is closed once it is "
+            "down about 4 dollars. At 10 percent it would run to 20 dollars before "
+            "being cut."
         ),
         kind="percent",
         minimum=_d("0.001"),
@@ -354,6 +494,22 @@ TUNABLES: tuple[Tunable, ...] = (
             "bad month: the most common way automated systems fail is trading harder "
             "to win losses back."
         ),
+        raising=(
+            "Allows a worse day before trading stops. The platform can trade through "
+            "a rough patch instead of standing down. The cost is that a genuinely bad "
+            "day runs further."
+        ),
+        lowering=(
+            "Stops trading sooner after losses. This is the control that prevents a "
+            "bad morning becoming a bad month; the most common way automated systems "
+            "fail is trading harder to win losses back. The cost is halting on days "
+            "that were merely unlucky."
+        ),
+        example=(
+            "On 200 dollars at the 5 percent default, losing about 10 dollars in a "
+            "day stops new trades until tomorrow. Existing positions are still "
+            "managed; only new entries stop."
+        ),
         kind="percent",
         minimum=_d("0.005"),
         maximum=_d("0.25"),
@@ -372,6 +528,23 @@ TUNABLES: tuple[Tunable, ...] = (
             "it was $500 at its peak and is $400 now, that is a 20% drawdown. Reach "
             "this number and the platform stops trading entirely and waits for you. "
             "It is the final backstop, not a routine limit."
+        ),
+        raising=(
+            "Permits the account to fall further from its best-ever value before "
+            "halting entirely. Survives a deeper slump without intervention. The cost "
+            "is that if something is genuinely broken, it breaks further before "
+            "stopping."
+        ),
+        lowering=(
+            "Halts sooner after a sustained decline. This is the final backstop, not "
+            "a routine limit: reaching it means something went wrong that the daily "
+            "limit did not catch. Setting it tight risks halting on ordinary "
+            "variance."
+        ),
+        example=(
+            "If the account peaked at 250 dollars, the 20 percent default halts "
+            "everything at 200. It does not resume on its own; a human decides "
+            "whether the strategy is broken or merely unlucky."
         ),
         kind="percent",
         minimum=_d("0.01"),
@@ -392,6 +565,23 @@ TUNABLES: tuple[Tunable, ...] = (
             "spread to enter and exit, so holding many small positions can bleed "
             "money in fees alone."
         ),
+        raising=(
+            "Holds more markets at once. Risk is spread more thinly and more "
+            "opportunities are taken. The cost is that each position pays the spread "
+            "twice, so many small ones bleed fees, and more positions means less "
+            "attention on each."
+        ),
+        lowering=(
+            "Concentrates into fewer markets. Lower total fees and easier to follow. "
+            "The cost is that each position matters more, and a single bad one is a "
+            "bigger share of the outcome."
+        ),
+        example=(
+            "At the 20 default, with a 10 percent position cap, the platform could in "
+            "principle hold 20 markets at 10 percent each, except the total exposure "
+            "limit binds first. That is exactly why several limits exist rather than "
+            "one."
+        ),
         kind="count",
         minimum=_d("1"),
         maximum=_d("100"),
@@ -409,6 +599,22 @@ TUNABLES: tuple[Tunable, ...] = (
             "A speed limit on orders. Not a trading strategy -- a safety catch. If "
             "something malfunctions, this bounds how much damage it can do in the "
             "minutes before anyone notices."
+        ),
+        raising=(
+            "Lets the platform act faster when many opportunities appear at once. The "
+            "cost is that a malfunction can do more damage before anyone notices."
+        ),
+        lowering=(
+            "Throttles order flow. This is a safety catch rather than a strategy: it "
+            "bounds how much harm a runaway loop can do in the minutes before a human "
+            "intervenes. Set too low, genuine opportunities are missed while the "
+            "platform waits its turn."
+        ),
+        example=(
+            "At the 30 default, a bug submitting orders in a tight loop could place "
+            "at most 30 in a minute rather than thousands. Combined with the 25 "
+            "dollar order cap, worst-case damage per minute is bounded at 750 dollars "
+            "of notional."
         ),
         kind="count",
         minimum=_d("1"),
@@ -431,6 +637,21 @@ TUNABLES: tuple[Tunable, ...] = (
             "Separate from the 1.00x leverage ceiling and always weaker than it: this "
             "can only make the platform more cautious, never less."
         ),
+        raising=(
+            "Commits more of the account to perpetual futures. This can never exceed "
+            "the 1x leverage ceiling: it only ever makes the platform more cautious "
+            "than that hard limit, never less."
+        ),
+        lowering=(
+            "Keeps perpetual exposure small. Perpetuals are the riskier of the two "
+            "products even at 1x, because they do not resolve to a fixed outcome the "
+            "way an event contract does."
+        ),
+        example=(
+            "On 200 dollars at the 50 percent default, at most 100 dollars is "
+            "committed to perpetuals. Even at 100 percent the leverage invariant "
+            "still caps exposure at the account's equity."
+        ),
         kind="percent",
         minimum=_d("0.01"),
         maximum=_d("1.00"),
@@ -444,6 +665,20 @@ TUNABLES: tuple[Tunable, ...] = (
         plain=(
             "How much of the account can ride on a single perpetual market. Same idea "
             "as the event-contract position limit, applied to the other domain."
+        ),
+        raising=(
+            "Allows more of the account into one perpetual market. Same trade-off as "
+            "the event-contract position limit: more upside when right, more damage "
+            "when wrong."
+        ),
+        lowering=(
+            "Limits how much any single perpetual can cost you. Perpetual prices move "
+            "continuously with no resolution date, so a position can drift against "
+            "you indefinitely."
+        ),
+        example=(
+            "On 200 dollars at the 15 percent default, one perpetual market can hold "
+            "30 dollars."
         ),
         kind="percent",
         minimum=_d("0.001"),
@@ -460,6 +695,18 @@ TUNABLES: tuple[Tunable, ...] = (
             "pay on the way in and again on the way out. Same meaning as the "
             "event-contract spread limit."
         ),
+        raising=(
+            "Trades perpetuals whose buying and selling prices sit further apart. "
+            "Same cost as the event spread limit: the gap is paid twice."
+        ),
+        lowering=(
+            "Restricts perpetual trading to tightly-priced markets. Fewer trades, "
+            "each starting closer to break-even."
+        ),
+        example=(
+            "At the 3 cent default the platform skips any perpetual quoted more than "
+            "3 cents wide."
+        ),
         kind="cents",
         minimum=_d("50"),
         maximum=_d("2000"),
@@ -474,6 +721,21 @@ TUNABLES: tuple[Tunable, ...] = (
             "If perpetual trading loses this much in one day, it stops opening new "
             "positions until tomorrow. Counted separately from event contracts, so a "
             "bad day in one domain does not halt the other."
+        ),
+        raising=(
+            "Allows a worse day on perpetuals before new entries stop. Counted "
+            "separately from event contracts, so one domain having a bad day does not "
+            "halt the other."
+        ),
+        lowering=(
+            "Stops perpetual trading sooner after losses. Because perpetuals never "
+            "resolve, a losing position has no natural end date, so stopping early "
+            "matters more here than for event contracts."
+        ),
+        example=(
+            "On 200 dollars at the 4 percent default, losing about 8 dollars on "
+            "perpetuals in a day stops new perpetual entries. Event-contract trading "
+            "continues unaffected."
         ),
         kind="percent",
         minimum=_d("0.005"),

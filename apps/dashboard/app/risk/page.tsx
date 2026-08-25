@@ -4,16 +4,52 @@
  * Every risk limit, its utilisation, and everything that fired.
  */
 
-import { api, timeAgo, type RiskEventRow } from "@/lib/api";
-import { DataTable, ErrorBox, Help, Pill, usePoll } from "@/components/ui";
+import { api, timeAgo, type DocsModel, type RiskEventRow } from "@/lib/api";
+import { DataTable, ErrorBox, Help, Pill, docsLink, usePoll } from "@/components/ui";
 import { PAGE } from "@/lib/explainers";
 
 type Limits = Record<string, unknown>;
+
+/**
+ * The reference entry for one row of the limits table.
+ *
+ * A field is either a slider (documented on the tunable) or configuration-only
+ * (documented in risk_fields). Rows with neither get no tooltip rather than an
+ * invented one.
+ */
+function docFor(
+  docs: DocsModel | null,
+  domain: string,
+  field: string,
+): { anchor: string; text: string } | null {
+  if (!docs) return null;
+  const tunable = docs.tunables.find((t) => t.key === `${domain}.${field}`);
+  if (tunable) return { anchor: tunable.anchor, text: tunable.plain || tunable.description };
+
+  const other = docs.risk_fields.find((f) => f.field === field);
+  if (other) return { anchor: other.anchor, text: other.body ?? other.short ?? "" };
+
+  // Several perpetual limits are the exact counterparts of event ones -- same
+  // meaning, different domain -- and only the event side is adjustable from
+  // the dashboard. Reuse that explanation rather than leaving the row bare or
+  // duplicating the prose, and say which domain it is describing.
+  const twin = docs.tunables.find((t) => t.key === `event.${field}`);
+  if (twin) {
+    return {
+      anchor: twin.anchor,
+      text: `${twin.plain || twin.description}
+
+This row is the perpetuals equivalent of the same limit, set in configuration rather than from the dashboard.`,
+    };
+  }
+  return null;
+}
 
 export default function RiskPage() {
   const { data: limits, error } = usePoll<Limits>(() => api.riskLimits(), 4000);
   const { data: events } = usePoll<{ events: RiskEventRow[] }>(() => api.riskEvents(), 4000);
   const lev = limits?.perp_leverage as Record<string, string> | undefined;
+  const { data: docs } = usePoll<DocsModel>(() => api.docs(), 60000);
 
   return (
     <>
@@ -61,12 +97,21 @@ export default function RiskPage() {
               {block ? (
                 <table>
                   <tbody>
-                    {Object.entries(block).map(([k, v]) => (
-                      <tr key={k}>
-                        <td className="muted">{k.replace(/_/g, " ")}</td>
-                        <td className="num">{String(v)}</td>
-                      </tr>
-                    ))}
+                    {Object.entries(block).map(([k, v]) => {
+                      // Every row gets an explanation and a link into the
+                      // reference. Which section it lives in depends on whether
+                      // it is adjustable from the dashboard.
+                      const doc = docFor(docs, domain, k);
+                      return (
+                        <tr key={k} {...(doc ? docsLink(doc.anchor) : {})}>
+                          <td className="muted">
+                            {k.replace(/_/g, " ")}
+                            {doc?.text ? <Help wide>{doc.text}</Help> : null}
+                          </td>
+                          <td className="num">{String(v)}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               ) : (

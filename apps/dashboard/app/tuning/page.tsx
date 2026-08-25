@@ -21,7 +21,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, type Tunable } from "@/lib/api";
-import { ErrorBox, Help, PageIntro, Pill } from "@/components/ui";
+import { ErrorBox, Help, PageIntro, Pill, docsLink } from "@/components/ui";
 
 /** Human-readable rendering of a raw value, by unit. */
 function display(t: Tunable, raw: string): string {
@@ -291,7 +291,12 @@ export default function TuningPage() {
               const level = riskLevel(t, value);
               const dirty = value !== t.value;
               return (
-                <div className="card" key={t.key} style={{ marginBottom: 12 }}>
+                <div
+                    className="card"
+                    key={t.key}
+                    style={{ marginBottom: 12 }}
+                    {...docsLink(`tunable-${t.key.replace(/\./g, "-")}`)}
+                  >
                   <div
                     className="row"
                     style={{ justifyContent: "space-between", alignItems: "baseline" }}
@@ -323,7 +328,7 @@ export default function TuningPage() {
                       step={t.step}
                       value={value}
                       aria-label={`${t.label}, currently ${display(t, value)}`}
-                      title="Drag to change. Double-click to reset to the default."
+                      title="Drag to change. Double-click to reset. Middle-click for the full explanation."
                       onChange={(e) =>
                         setDraft((d) => ({ ...d, [t.key]: e.target.value }))
                       }
@@ -367,7 +372,12 @@ export default function TuningPage() {
             Shown here so it is visible beside the sliders rather than absent from the page.
           </div>
           {locked.map((t) => (
-            <div className="card" key={t.key} style={{ marginBottom: 12, opacity: 0.95 }}>
+            <div
+                className="card"
+                key={t.key}
+                style={{ marginBottom: 12, opacity: 0.95 }}
+                {...docsLink("concept-leverage")}
+              >
               <div
                 className="row"
                 style={{ justifyContent: "space-between", alignItems: "baseline" }}
