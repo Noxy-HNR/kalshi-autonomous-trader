@@ -334,17 +334,32 @@ async def select_event_watchlist(
     excluded outright.
     """
     markets = await rest.get_markets(status="open", limit=200, max_pages=5)
-    tradeable = [
-        m
-        for m in markets
-        if m.is_tradeable and m.yes_bid_cc is not None and m.yes_ask_cc is not None
-    ]
+    active = [m for m in markets if m.is_tradeable]
+    # `has_live_quote`, not `is not None`: Kalshi reports an unquoted market as a
+    # $0.00/$1.00 book rather than as a null, so the null test passed literally
+    # every market and spent the subscription budget on markets with no orders
+    # in them. See EventMarket.has_live_quote.
+    tradeable = [m for m in active if m.has_live_quote]
     tradeable.sort(key=lambda m: m.volume_24h_qc or 0, reverse=True)
     chosen = [m.ticker for m in tradeable[:limit]]
     log.info(
         "ingestion.watchlist_selected",
-        domain="event", considered=len(markets), tradeable=len(tradeable), chosen=len(chosen),
+        domain="event",
+        considered=len(markets),
+        active=len(active),
+        quoted=len(tradeable),
+        unquoted=len(active) - len(tradeable),
+        chosen=len(chosen),
     )
+    if not chosen and active:
+        # Worth saying out loud rather than subscribing to nothing in silence:
+        # on the demo exchange this is the normal state of most of the board.
+        log.warning(
+            "ingestion.no_quoted_markets",
+            domain="event",
+            active=len(active),
+            note="no market has orders on both sides; nothing to subscribe to",
+        )
     return chosen
 
 

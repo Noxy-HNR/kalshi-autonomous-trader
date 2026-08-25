@@ -153,6 +153,26 @@ class EventMarket:
     def is_tradeable(self) -> bool:
         return self.status == "active"
 
+    @property
+    def has_live_quote(self) -> bool:
+        """Whether anyone is actually quoting this market on both sides.
+
+        Kalshi encodes "no orders at all" as a full-width book -- a bid of
+        ``$0.0000`` and an ask of ``$1.0000`` -- rather than as a null. Those
+        parse into perfectly valid integers, so an ``is not None`` test cannot
+        tell an unquoted market from a quoted one and accepts every market on
+        the exchange. That is the absence of a quote wearing the costume of a
+        price, and it is exactly the case that filled 57 of 60 watchlist slots
+        with markets that had no orders in them.
+
+        A real two-sided quote sits strictly inside the boundaries with the bid
+        below the ask.
+        """
+        bid, ask = self.yes_bid_cc, self.yes_ask_cc
+        if bid is None or ask is None:
+            return False
+        return 0 < bid < ask < 10_000
+
     def tick_size_cc(self, at_price_cc: int) -> int:
         """Minimum price increment valid at ``at_price_cc`` for this market.
 
