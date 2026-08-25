@@ -9,7 +9,7 @@
  * colour *and* by words, never by colour alone.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError } from "@/lib/api";
 
 export function Stat({
@@ -99,9 +99,16 @@ export function usePoll<T>(
   const [error, setError] = useState<unknown>(null);
   const [loading, setLoading] = useState(true);
 
+  // Callers build a new `fetcher` closure on every render, so depending on it
+  // directly would tear the interval down and restart it each time. It is held
+  // in a ref instead: the interval stays stable while the function it calls is
+  // always the current one rather than the one captured on first render.
+  const latest = useRef(fetcher);
+  latest.current = fetcher;
+
   const run = useCallback(async () => {
     try {
-      const result = await fetcher();
+      const result = await latest.current();
       setData(result);
       setError(null);
     } catch (e) {
@@ -109,14 +116,26 @@ export function usePoll<T>(
     } finally {
       setLoading(false);
     }
-    // fetcher is recreated per render by callers; interval identity is what matters
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
     let alive = true;
     const tick = async () => {
-      if (alive) await run();
+      if (!alive) return;
+      try {
+        const result = await latest.current();
+        // Re-checked after the await: navigating away mid-request would
+        // otherwise let a resolved response write into a component that is no
+        // longer mounted, and on a fast click-through that response belongs to
+        // the page you just left.
+        if (!alive) return;
+        setData(result);
+        setError(null);
+      } catch (e) {
+        if (alive) setError(e);
+      } finally {
+        if (alive) setLoading(false);
+      }
     };
     void tick();
     const id = setInterval(tick, intervalMs);
@@ -124,7 +143,7 @@ export function usePoll<T>(
       alive = false;
       clearInterval(id);
     };
-  }, [run, intervalMs]);
+  }, [intervalMs]);
 
   return { data, error, loading, refresh: run };
 }
