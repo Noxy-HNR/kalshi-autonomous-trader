@@ -367,6 +367,7 @@ class Platform:
             domain="event",
             ping_interval_s=settings.kalshi.ws_ping_interval_s,
             ping_timeout_s=settings.kalshi.ws_ping_timeout_s,
+                silence_timeout_s=settings.kalshi.ws_silence_timeout_s,
             max_reconnect_delay_s=settings.kalshi.ws_max_reconnect_delay_s,
         )
         event_ingestor = MarketDataIngestor(
@@ -412,6 +413,7 @@ class Platform:
                 domain="perp",
                 ping_interval_s=settings.kalshi.ws_ping_interval_s,
                 ping_timeout_s=settings.kalshi.ws_ping_timeout_s,
+                silence_timeout_s=settings.kalshi.ws_silence_timeout_s,
                 max_reconnect_delay_s=settings.kalshi.ws_max_reconnect_delay_s,
             )
             perp_ingestor = MarketDataIngestor(

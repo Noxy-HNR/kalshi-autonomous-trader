@@ -133,6 +133,10 @@ class KalshiSettings(BaseSettings):
     #: the connection needs to tolerate a bad minute rather than react to it.
     ws_ping_interval_s: float = Field(default=20.0, ge=1.0, le=120.0)
     ws_ping_timeout_s: float = Field(default=45.0, ge=1.0, le=180.0)
+    #: Silence that means the subscription is gone, not that the market is
+    #: quiet. Ten minutes: long enough that an idle overnight market does not
+    #: trip it, short enough that a genuinely dropped subscription is noticed.
+    ws_silence_timeout_s: float = Field(default=600.0, ge=30.0, le=3600.0)
     ws_max_reconnect_delay_s: float = Field(default=30.0, ge=1.0, le=300.0)
 
     # Token-bucket budgets. Defaults are the documented Basic tier; the platform

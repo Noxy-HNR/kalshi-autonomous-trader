@@ -97,6 +97,7 @@ class KalshiWebSocket:
         domain: str,
         ping_interval_s: float = 20.0,
         ping_timeout_s: float = 45.0,
+        silence_timeout_s: float = 600.0,
         max_reconnect_delay_s: float = 30.0,
         message_queue_size: int = 10_000,
     ) -> None:
@@ -106,8 +107,18 @@ class KalshiWebSocket:
         self.ping_interval_s = ping_interval_s
         self.ping_timeout_s = ping_timeout_s
         #: How long a subscribed connection may deliver nothing at all before it
-        #: is treated as dead. Replaces the pong deadline as the liveness test.
-        self.silence_timeout_s = max(ping_timeout_s, ping_interval_s * 3)
+        #: is treated as dead.
+        #:
+        #: Generous on purpose. A quiet market genuinely sends nothing: derived
+        #: from the ping settings this came out at 60s, and on a Monday evening
+        #: it fired ten times in eleven minutes against markets that were simply
+        #: not trading -- trading one kind of reconnect churn for another.
+        #:
+        #: The transport is not what this is watching. The library still sends
+        #: pings, and a broken socket still raises; this only catches the slower
+        #: failure where the connection is fine but the subscription has been
+        #: silently dropped. That deserves minutes, not seconds.
+        self.silence_timeout_s = silence_timeout_s
         self.max_reconnect_delay_s = max_reconnect_delay_s
 
         self.state = WSState.DISCONNECTED
