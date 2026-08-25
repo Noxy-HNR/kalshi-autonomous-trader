@@ -218,13 +218,18 @@ export function DataTable<T>({
   empty?: string;
   rowKey: (row: T, index: number) => string;
 }) {
-  if (!rows.length) return <Empty>{empty}</Empty>;
+  // Defaulted rather than assumed. Every caller currently guards its own rows,
+  // but a table is the last place a rendering crash should originate: it is
+  // wrapped around data that is, by definition, arriving from elsewhere.
+  const safeRows = rows ?? [];
+  const safeColumns = columns ?? [];
+  if (!safeRows.length || !safeColumns.length) return <Empty>{empty}</Empty>;
   return (
     <div className="table-wrap">
       <table>
         <thead>
           <tr>
-            {columns.map((c) => (
+            {safeColumns.map((c) => (
               <th key={c.header} className={c.num ? "num" : undefined}>
                 {c.header}
               </th>
@@ -232,9 +237,9 @@ export function DataTable<T>({
           </tr>
         </thead>
         <tbody>
-          {rows.map((row, i) => (
+          {safeRows.map((row, i) => (
             <tr key={rowKey(row, i)}>
-              {columns.map((c) => (
+              {safeColumns.map((c) => (
                 <td key={c.header} className={c.num ? "num" : undefined}>
                   {c.cell(row)}
                 </td>

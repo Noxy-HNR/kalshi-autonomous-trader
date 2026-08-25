@@ -133,10 +133,10 @@ export default function OverviewPage() {
                       ) : (
                         <div className="muted small">No cycle has run yet.</div>
                       )}
-                      {cycle && Object.keys(cycle.rejection_reasons).length > 0 ? (
+                      {cycle && Object.keys(cycle.rejection_reasons ?? {}).length > 0 ? (
                         <div className="note">
                           Last cycle declined:{" "}
-                          {Object.entries(cycle.rejection_reasons)
+                          {Object.entries(cycle.rejection_reasons ?? {})
                             .map(([reason, count]) => `${reason} (${count})`)
                             .join(", ")}
                           . Declining is the normal outcome — the platform is designed to be

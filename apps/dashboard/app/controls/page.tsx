@@ -94,7 +94,9 @@ export default function ControlsPage() {
           <h2>Operating mode</h2>
           <div className="card">
             <div className="row">
-              {data.modes.map((mode) => (
+              {/* The list comes from the engine; an older or degraded response
+                  may not carry it, and a missing list is an empty one, not a crash. */}
+              {(data.modes ?? []).map((mode) => (
                 <button
                   key={mode}
                   disabled={busy !== null || mode === data.operating_mode}
