@@ -169,7 +169,11 @@ class Platform:
             log.info("kalshi.exchange_status", **{k: v for k, v in status.items() if k != "exchange_index_statuses"})
         except Exception as exc:
             log.error("kalshi.exchange_status_failed", error=str(exc))
-            self.app.report.blocking_reasons.append(f"Kalshi is unreachable: {exc}")
+            # Latched: the next health probe cannot tell whether the exchange
+            # came back, and re-permitting trading against an exchange we never
+            # reached is precisely what this block exists to prevent. Cleared by
+            # the reconciliation cycle, which does contact the exchange.
+            self.app.add_block("kalshi", f"Kalshi is unreachable: {exc}")
 
         # Real tier budgets, so the limiter stops guessing.
         if self.settings.kalshi.event_credentials.configured:
@@ -591,6 +595,11 @@ class Platform:
         """
         if self.settings.environment is TradingEnvironment.PAPER:
             self.app.report.reconciled = True
+            # No exchange account exists to reconcile against, so a start-up
+            # probe failure must not latch trading off forever in paper mode.
+            self.app.clear_block("reconcile:event")
+            self.app.clear_block("reconcile:perp")
+            self.app.clear_block("kalshi")
             log.info("reconcile.skipped_paper_mode")
             self._publish_trading_gate()
             return
@@ -606,9 +615,14 @@ class Platform:
             event_loop.account_state = EventAccountState()
         report = await reconciler.reconcile_event_contracts(event_loop.account_state, now_ms=now_ms)
         if await reconciler.halt_if_unsafe(report):
-            self.app.report.blocking_reasons.append("event reconciliation failed")
-        elif report.orphaned_orders:
-            await reconciler.cancel_orphans(report, MarketType.EVENT)
+            # "We do not know what we hold" is not a condition a liveness probe
+            # can disprove, so it stays latched until a reconciliation succeeds.
+            self.app.add_block("reconcile:event", "event reconciliation failed")
+        else:
+            self.app.clear_block("reconcile:event")
+            self.app.clear_block("kalshi")
+            if report.orphaned_orders:
+                await reconciler.cancel_orphans(report, MarketType.EVENT)
 
         if self.perps_enabled:
             perp_loop = self.context.loops[MarketType.PERP]
@@ -618,9 +632,13 @@ class Platform:
                 perp_loop.account_state, now_ms=now_ms
             )
             if await reconciler.halt_if_unsafe(perp_report):
-                self.app.report.blocking_reasons.append("perpetual reconciliation failed")
-            elif perp_report.orphaned_orders:
-                await reconciler.cancel_orphans(perp_report, MarketType.PERP)
+                self.app.add_block(
+                    "reconcile:perp", "perpetual reconciliation failed"
+                )
+            else:
+                self.app.clear_block("reconcile:perp")
+                if perp_report.orphaned_orders:
+                    await reconciler.cancel_orphans(perp_report, MarketType.PERP)
 
         self.app.report.reconciled = True
         self._publish_trading_gate()

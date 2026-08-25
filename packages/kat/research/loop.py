@@ -360,7 +360,18 @@ class ResearchLoop:
         applied = self.registry.promote(
             strategy_id,
             actor=actor,
-            gate_results={"gates": recommendation.gates, "approved_by": actor},
+            gate_results={
+                # The gates that actually authorised this, not the ones shown at
+                # staging time. registry.promote writes these verbatim into the
+                # audit row, so recording the stale snapshot would make the
+                # permanent answer to "what evidence put this strategy on real
+                # money?" a number that was already known to be wrong when the
+                # promotion was granted.
+                "gates": [g.to_dict() for g in decision.gates],
+                "staged_gates": recommendation.gates,
+                "staged_at_ms": recommendation.created_ms,
+                "approved_by": actor,
+            },
         )
         self.recommendations.pop(strategy_id, None)
         if applied is not None:

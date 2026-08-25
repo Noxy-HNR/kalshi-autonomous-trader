@@ -478,3 +478,55 @@ class TestResearchLoop:
         assert loop.recommendations == {}
         assert registry.get("s1").state is StrategyState.BACKTEST
         assert loop.reject("s1", actor="operator") is False
+
+
+class TestApprovalAuditTrail:
+    """What gets written down as the reason a strategy was promoted.
+
+    `approve` re-runs the gates rather than trusting the staged verdict, then
+    used to persist the *staged* gate block as the promotion's justification.
+    The decision was always correct; the permanent record of why was not.
+    """
+
+    def test_the_persisted_gates_are_the_ones_that_authorised_it(self):
+        loop, registry = _loop(OperatingMode.GATED_DISCOVERY)
+        loop.evaluate_all()
+
+        staged = loop.recommendations["s1"].gates
+        staged_sharpe = next(g for g in staged if g.get("name") == "backtest_present")
+
+        # Evidence changes between staging and approval, but still passes.
+        loop.evidence["s1"]["backtest_metrics"]["sharpe"] = 0.9
+        loop.evidence["s1"]["backtest_metrics"]["expectancy_micros"] = 11_111
+
+        captured: dict = {}
+        original = registry.promote
+
+        def spy(strategy_id, *, actor, gate_results=None):
+            captured.update(gate_results or {})
+            return original(strategy_id, actor=actor, gate_results=gate_results)
+
+        registry.promote = spy
+        assert loop.approve("s1", actor="operator") is StrategyState.OUT_OF_SAMPLE
+
+        assert captured["approved_by"] == "operator"
+        # Both are kept, and they are distinguishable.
+        assert "gates" in captured and "staged_gates" in captured
+        assert captured["staged_gates"] == staged
+        assert captured["staged_gates"] is not captured["gates"]
+        assert staged_sharpe in captured["staged_gates"]
+        # The authorising block reflects the evidence at approval time.
+        observed = {g["name"]: g["observed"] for g in captured["gates"]}
+        assert "11111" in observed["backtest_expectancy"]
+
+    def test_a_refused_approval_writes_nothing(self):
+        loop, registry = _loop(OperatingMode.GATED_DISCOVERY)
+        loop.evaluate_all()
+        loop.evidence["s1"]["backtest_metrics"]["expectancy_micros"] = -1
+
+        calls: list = []
+        registry.promote = lambda *a, **kw: calls.append(kw) or None
+
+        assert loop.approve("s1", actor="operator") is None
+        assert calls == []
+        assert registry.get("s1").state is StrategyState.BACKTEST

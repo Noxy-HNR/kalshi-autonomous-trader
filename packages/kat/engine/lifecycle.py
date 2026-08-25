@@ -46,7 +46,7 @@ import contextlib
 import platform
 import signal
 import sys
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -250,6 +250,11 @@ class Application:
         self._started_ms = 0
         # Set only when the full start-up sequence completed successfully.
         self._trading_permitted = False
+        #: Blocks that cannot be re-tested by a health probe and must therefore
+        #: be cleared by whoever set them. Reconciliation is the motivating
+        #: case: "we do not know what positions we hold" is not a condition a
+        #: liveness check can disprove, and it must not lapse on its own.
+        self._latched_blocks: dict[str, str] = {}
 
     # -- registration --------------------------------------------------------
 
@@ -258,6 +263,56 @@ class Application:
         if self.phase not in (Phase.CREATED, Phase.STARTING):
             raise RuntimeError("components must be registered before the application starts")
         self.components.append(component)
+
+    # -- blocks --------------------------------------------------------------
+
+    def add_block(self, key: str, reason: str) -> None:
+        """Latch a condition that must stop trading until explicitly cleared.
+
+        Use this rather than appending to ``report.blocking_reasons`` directly.
+        A bare append is only read once, during start-up, and the health loop
+        then recovers the application without ever knowing the reason existed.
+        """
+        if key not in self._latched_blocks:
+            log.warning("app.block_latched", block=key, reason=reason)
+        self._latched_blocks[key] = reason
+        if reason not in self.report.blocking_reasons:
+            self.report.blocking_reasons.append(reason)
+
+    def clear_block(self, key: str) -> None:
+        """Release a latched block, because the condition behind it is resolved."""
+        reason = self._latched_blocks.pop(key, None)
+        if reason is None:
+            return
+        log.info("app.block_cleared", block=key, reason=reason)
+        with contextlib.suppress(ValueError):
+            self.report.blocking_reasons.remove(reason)
+
+    def current_blocks(self, unhealthy_critical: Sequence[str] = ()) -> list[str]:
+        """Everything blocking trading *right now*.
+
+        One definition, consulted by both start-up and the health loop. They
+        used to disagree: start-up refused to permit trading for any of seven
+        reasons, and the health loop re-permitted it five seconds later after
+        checking two of them. An engaged event kill switch, a failed
+        reconciliation, or an unreachable exchange were all silently cleared
+        without anything having changed.
+        """
+        reasons: list[str] = []
+
+        for status in self.kill_switches.all_statuses():
+            if status.engaged:
+                subject = f":{status.subject}" if status.subject else ""
+                reasons.append(
+                    f"kill switch engaged: {status.scope}{subject}"
+                    f" ({status.reason or 'no reason recorded'})"
+                )
+
+        reasons.extend(
+            f"critical component {name} is unhealthy" for name in unhealthy_critical
+        )
+        reasons.extend(self._latched_blocks.values())
+        return reasons
 
     # -- the trading gate ----------------------------------------------------
 
@@ -312,11 +367,17 @@ class Application:
             except Exception as exc:
                 self.phase = Phase.FAILED
                 self.report.phase = Phase.FAILED
-                self.report.blocking_reasons.append(f"{type(exc).__name__}: {exc}")
+                self.add_block("startup", f"{type(exc).__name__}: {exc}")
                 log.error("app.startup_failed", error=str(exc), exc_info=True)
                 return self.report
 
-            # Trading is permitted only when nothing is blocking.
+            # Trading is permitted only when nothing is blocking. The live
+            # conditions are folded in here so start-up and the health loop
+            # reach their verdict the same way.
+            for reason in self.current_blocks():
+                if reason not in self.report.blocking_reasons:
+                    self.report.blocking_reasons.append(reason)
+
             if self.report.blocking_reasons:
                 self.phase = Phase.DEGRADED
                 self._trading_permitted = False
@@ -363,7 +424,7 @@ class Application:
             # A platform without a database can still observe markets, but it
             # cannot audit, cannot persist state and cannot be trusted to
             # reconcile after a restart. That is not a trading state.
-            self.report.blocking_reasons.append(f"database unavailable: {exc}")
+            self.add_block("database", f"database unavailable: {exc}")
             log.error("app.database_unavailable", error=str(exc))
             return
 
@@ -375,12 +436,15 @@ class Application:
         """Restore kill switches and detect whether the last shutdown was clean."""
         await self.kill_switches.load()
 
+        # Engaged switches are not appended here: they are re-derived live by
+        # `current_blocks`, so a switch released while running stops blocking
+        # and a switch engaged while running starts blocking, without either
+        # depending on what was true at start-up.
         engaged = [s for s in self.kill_switches.all_statuses() if s.engaged]
         if engaged:
-            self.report.blocking_reasons.extend(
-                f"kill switch engaged: {s.scope}{':' + s.subject if s.subject else ''}"
-                f" ({s.reason or 'no reason recorded'})"
-                for s in engaged
+            log.warning(
+                "app.kill_switches_engaged_at_startup",
+                switches=[f"{s.scope}:{s.subject}" for s in engaged],
             )
 
         if not self.report.database_ready:
@@ -428,14 +492,16 @@ class Application:
                 message = f"component {component.name} failed to start: {exc}"
                 log.error("component.start_failed", component=component.name, error=str(exc))
                 if component.critical:
-                    self.report.blocking_reasons.append(message)
+                    self.add_block(f"component:{component.name}", message)
 
     async def _run_health_checks(self) -> None:
         for component in self.components:
             ok = await component.check_health()
             if not ok and component.critical:
-                self.report.blocking_reasons.append(
-                    f"critical component {component.name} is unhealthy: {component.status.detail}"
+                self.add_block(
+                    f"component:{component.name}",
+                    f"critical component {component.name} is unhealthy: "
+                    f"{component.status.detail}",
                 )
 
     # -- running -------------------------------------------------------------
@@ -483,26 +549,36 @@ class Application:
                 if self.database is not None and self.report.database_ready:
                     await self.database.ping()
 
-                if unhealthy_critical and self.phase is Phase.RUNNING:
+                # The same predicate start-up used. Recovery that checked a
+                # narrower set of conditions than the refusal did would undo the
+                # refusal without anything having changed -- which is exactly
+                # what it used to do, within five seconds, for an engaged kill
+                # switch or a failed reconciliation.
+                blocks = self.current_blocks(unhealthy_critical)
+                self.report.blocking_reasons = list(blocks)
+
+                if blocks and self.phase is Phase.RUNNING:
                     # Stop trading, keep observing. Existing positions still need
                     # to be managed, and the dashboard still needs to be truthful.
                     self.phase = Phase.DEGRADED
                     self._trading_permitted = False
-                    log.error("app.degraded", components=unhealthy_critical)
+                    log.error("app.degraded", reasons=blocks)
                     self._audit(
                         "trading_disabled_degraded",
                         subject="application",
-                        detail={"unhealthy": unhealthy_critical},
+                        detail={"reasons": blocks},
                         severity="critical",
                     )
-                elif not unhealthy_critical and self.phase is Phase.DEGRADED:
-                    # Recovery does NOT automatically re-arm live trading if the
-                    # reason we degraded was a reconciliation failure -- that
-                    # requires the kill switch to be released deliberately.
-                    if not self.kill_switches.is_engaged(KillSwitchScope.RISK):
-                        self.phase = Phase.RUNNING
-                        self._trading_permitted = True
-                        log.info("app.recovered")
+                elif not blocks and self.phase is Phase.DEGRADED:
+                    self.phase = Phase.RUNNING
+                    self._trading_permitted = True
+                    log.info("app.recovered")
+                    self._audit(
+                        "trading_re_enabled",
+                        subject="application",
+                        detail={"note": "every blocking condition cleared"},
+                        severity="warning",
+                    )
 
                 metrics.gauge("app.trading_permitted", 1.0 if self.trading_permitted else 0.0)
                 metrics.gauge("app.uptime_s", (self.clock.now_ms() - self._started_ms) / 1000)
