@@ -5,13 +5,15 @@ After=network-online.target postgresql.service
 Wants=network-online.target
 
 [Service]
+# Paths assume an install at /opt/kat. Change all four below together if
+# yours lives elsewhere -- systemd will not resolve a relative path.
 Type=simple
 User=kat
-WorkingDirectory=C:\AI\kalshi-autonomous-trader
+WorkingDirectory=/opt/kat
 Environment=PYTHONUNBUFFERED=1
 # Secrets live outside the repository; this file is read by systemd, not by git.
 EnvironmentFile=-/etc/kat/kat.env
-ExecStart=C:\AI\kalshi-autonomous-trader/.venv/bin/python -m kat.engine.entrypoint
+ExecStart=/opt/kat/.venv/bin/python -m kat.engine.entrypoint
 Restart=always
 RestartSec=10
 # Long enough for the graceful shutdown path to drain the write queue and record
@@ -25,7 +27,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=C:\AI\kalshi-autonomous-trader/logs C:\AI\kalshi-autonomous-trader/data
+ReadWritePaths=/opt/kat/logs /opt/kat/data
 
 [Install]
 WantedBy=multi-user.target

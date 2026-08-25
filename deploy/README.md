@@ -10,7 +10,7 @@ restarting the process if it exits.
 ## Windows (scheduled task, runs at logon)
 
 ```
-schtasks /Create /TN "KalshiAutonomousTrader" /SC ONLOGON /RL LIMITED /F /TR "\"C:\AI\kalshi-autonomous-trader\.venv\Scripts\python.exe\" -m kat.engine.entrypoint" /WD "C:\AI\kalshi-autonomous-trader"
+schtasks /Create /TN "KalshiAutonomousTrader" /SC ONLOGON /RL LIMITED /F /TR "\"C:\AI\projects\kalshi-autonomous-trader\.venv\Scripts\python.exe\" -m kat.engine.entrypoint" /WD "C:\AI\projects\kalshi-autonomous-trader"
 ```
 
 To remove it:
@@ -47,8 +47,11 @@ A restart comes back in exactly that state.
 
 ## Verifying it came back up
 
+The port is whatever `KAT_API_PORT` is set to in `.env` (8020 on this machine,
+8000 by default).
+
 ```
-curl -s http://127.0.0.1:8000/api/health
+curl -s http://127.0.0.1:8020/api/health
 ```
 
 After any restart the platform reconciles its state against the exchange before
