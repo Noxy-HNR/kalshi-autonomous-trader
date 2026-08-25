@@ -223,7 +223,13 @@ def normalise(item: RawItem, clock: Clock) -> Article | None:
         # Claimed to be published after we received it, which is impossible.
         # The item is kept and marked rather than trusted or discarded.
         quality = DataQuality.SUSPECT
-        log.warning(
+        # Debug, not warning. This is a property of a *source*, not of an
+        # article: ESPN stamps its August items EST while Eastern is on EDT, so
+        # every one of its items trips this. Logged per article it produced 1,390
+        # of 1,527 warnings in a day and buried everything else. The pipeline
+        # summarises it once per source per cycle instead; the flag on the
+        # article is what actually matters, and that is unchanged.
+        log.debug(
             "news.future_publication_time",
             source=item.source_id,
             published_ms=item.published_ms,

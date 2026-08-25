@@ -39,7 +39,7 @@ from kat.news.impact import ImpactEstimate, ImpactEstimator
 from kat.news.matching import MarketMatch, MarketMatcher, MarketProfile
 from kat.news.normalise import normalise
 from kat.news.sources import NewsSource, load_sources
-from kat.news.types import Article
+from kat.news.types import Article, DataQuality
 from kat.observability.logging import get_logger
 from kat.observability.metrics import metrics
 
@@ -58,6 +58,7 @@ class PipelineResult:
     matched: int = 0
     signals: int = 0
     dropped: int = 0
+    future_dated: int = 0
     source_failures: list[str] = field(default_factory=list)
     item_failures: int = 0
     duration_ms: float = 0.0
@@ -70,6 +71,7 @@ class PipelineResult:
             "matched": self.matched,
             "signals": self.signals,
             "dropped": self.dropped,
+            "future_dated": self.future_dated,
             "source_failures": list(self.source_failures),
             "item_failures": self.item_failures,
             "duration_ms": round(self.duration_ms, 1),
@@ -225,6 +227,36 @@ class NewsPipeline:
             if article is not None:
                 articles.append(article)
         result.normalised = len(articles)
+
+        # One line per affected source per cycle, rather than one per article.
+        # A source whose clock or timezone is wrong is worth knowing about once;
+        # it is not worth thirty warnings every five minutes forever.
+        future_dated: dict[str, int] = {}
+        for article in articles:
+            if (
+                article.quality is DataQuality.SUSPECT
+                and article.published_ms
+                and article.published_ms > article.ingested_ms
+            ):
+                future_dated[article.source] = future_dated.get(article.source, 0) + 1
+        for source, count in future_dated.items():
+            worst = max(
+                a.published_ms - a.ingested_ms
+                for a in articles
+                if a.source == source and a.published_ms and a.published_ms > a.ingested_ms
+            )
+            log.warning(
+                "news.source_clock_ahead",
+                source=source,
+                articles=count,
+                worst_ahead_ms=worst,
+                note=(
+                    "the source timestamps items after we received them, which is "
+                    "impossible; they are kept and flagged, and nothing downstream "
+                    "reads published time for decisions"
+                ),
+            )
+        result.future_dated = sum(future_dated.values())
 
         unique = self.deduplicator.process(articles)
         result.unique = len(unique)
