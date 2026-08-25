@@ -9,7 +9,8 @@
  */
 
 import { api, timeAgo, type ArbRow } from "@/lib/api";
-import { DataTable, ErrorBox, Pill, usePoll } from "@/components/ui";
+import { DataTable, ErrorBox, Help, Pill, usePoll } from "@/components/ui";
+import { PAGE } from "@/lib/explainers";
 
 export default function ArbitragePage() {
   const { data, error } = usePoll<{ opportunities: ArbRow[] }>(() => api.arbitrage(), 4000);
@@ -18,7 +19,9 @@ export default function ArbitragePage() {
 
   return (
     <>
-      <h1>Arbitrage</h1>
+      <h1>
+        Arbitrage <Help wide>{PAGE.arbitrage}</Help>
+      </h1>
       <div className="sub">
         Logical pricing inconsistencies, priced after fees, depth and leg risk.
       </div>

@@ -5,7 +5,8 @@
  */
 
 import { api, type SystemStatus } from "@/lib/api";
-import { ErrorBox, Pill, Stat, usePoll } from "@/components/ui";
+import { ErrorBox, Help, Pill, Stat, usePoll } from "@/components/ui";
+import { PAGE } from "@/lib/explainers";
 
 function histogram(
   metrics: SystemStatus["metrics"] | undefined,
@@ -21,7 +22,9 @@ export default function SystemPage() {
 
   return (
     <>
-      <h1>System</h1>
+      <h1>
+        System <Help wide>{PAGE.system}</Help>
+      </h1>
       <div className="sub">Resources, queues, latency and feed health.</div>
       <ErrorBox error={error} />
 

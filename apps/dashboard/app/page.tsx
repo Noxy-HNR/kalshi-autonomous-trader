@@ -1,14 +1,17 @@
 "use client";
 
 import { api, usd, type Overview } from "@/lib/api";
-import { EnvironmentBanner, ErrorBox, Pill, Stat, usePoll } from "@/components/ui";
+import { EnvironmentBanner, ErrorBox, Help, Pill, Stat, usePoll } from "@/components/ui";
+import { PAGE } from "@/lib/explainers";
 
 export default function OverviewPage() {
   const { data, error } = usePoll<Overview>(() => api.overview(), 2000);
 
   return (
     <>
-      <h1>Overview</h1>
+      <h1>
+        Overview <Help wide>{PAGE.overview}</Help>
+      </h1>
       <div className="sub">Account, exposure and health across both trading domains.</div>
       <ErrorBox error={error} />
 

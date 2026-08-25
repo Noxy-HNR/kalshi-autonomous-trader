@@ -9,7 +9,8 @@
  */
 
 import { api, timeAgo, type NewsRow } from "@/lib/api";
-import { ErrorBox, Empty, Pill, usePoll } from "@/components/ui";
+import { Empty, ErrorBox, Help, Pill, usePoll } from "@/components/ui";
+import { PAGE } from "@/lib/explainers";
 
 export default function NewsPage() {
   const { data, error } = usePoll<{ articles: NewsRow[] }>(() => api.news(), 10000);
@@ -17,7 +18,9 @@ export default function NewsPage() {
 
   return (
     <>
-      <h1>News &amp; research</h1>
+      <h1>
+        News &amp; research <Help wide>{PAGE.news}</Help>
+      </h1>
       <div className="sub">
         Ingested articles, extracted entities, and the markets they were matched to.
       </div>

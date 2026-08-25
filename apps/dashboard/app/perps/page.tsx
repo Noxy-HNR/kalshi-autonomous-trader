@@ -14,7 +14,8 @@
  */
 
 import { api, usd, timeAgo, type LeveragePanel, type RiskEventRow } from "@/lib/api";
-import { DataTable, ErrorBox, Pill, Stat, usePoll } from "@/components/ui";
+import { DataTable, ErrorBox, Help, Pill, Stat, usePoll } from "@/components/ui";
+import { PAGE } from "@/lib/explainers";
 
 interface PerpPosition {
   ticker: string;
@@ -42,7 +43,9 @@ export default function PerpsPage() {
 
   return (
     <>
-      <h1>Perpetuals</h1>
+      <h1>
+        Perpetuals <Help wide>{PAGE.perps}</Help>
+      </h1>
       <div className="sub">
         Margin, funding, exposure and the leverage ceiling this platform will not cross.
       </div>

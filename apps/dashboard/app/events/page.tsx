@@ -5,7 +5,8 @@
  */
 
 import { api, usd, type DomainSummary, type Overview } from "@/lib/api";
-import { DataTable, ErrorBox, Stat, usePoll } from "@/components/ui";
+import { DataTable, ErrorBox, Help, Stat, usePoll } from "@/components/ui";
+import { PAGE } from "@/lib/explainers";
 
 interface EventPosition {
   ticker: string;
@@ -28,7 +29,9 @@ export default function EventsPage() {
 
   return (
     <>
-      <h1>Event contracts</h1>
+      <h1>
+        Event contracts <Help wide>{PAGE.events}</Help>
+      </h1>
       <div className="sub">
         Fully collateralised positions: maximum loss is known exactly at entry, so there is no
         leverage to constrain here -- only capital, concentration and loss budgets.

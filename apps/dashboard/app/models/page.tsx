@@ -9,7 +9,8 @@
  */
 
 import { api, type ModelRow } from "@/lib/api";
-import { DataTable, ErrorBox, Pill, stateTone, usePoll } from "@/components/ui";
+import { DataTable, ErrorBox, Help, Pill, stateTone, usePoll } from "@/components/ui";
+import { PAGE } from "@/lib/explainers";
 
 function num(block: Record<string, number> | null | undefined, key: string, digits = 4): string {
   const v = block?.[key];
@@ -22,7 +23,9 @@ export default function ModelsPage() {
 
   return (
     <>
-      <h1>Models</h1>
+      <h1>
+        Models <Help wide>{PAGE.models}</Help>
+      </h1>
       <div className="sub">
         Versions, training windows, per-split metrics, calibration and deployment state.
       </div>

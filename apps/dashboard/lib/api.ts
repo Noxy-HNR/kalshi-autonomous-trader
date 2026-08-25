@@ -322,6 +322,7 @@ export interface Tunable {
   domain: string;
   label: string;
   description: string;
+  plain: string;
   kind: string;
   value: string;
   default: string;

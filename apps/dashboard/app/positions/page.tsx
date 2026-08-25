@@ -5,7 +5,8 @@
  */
 
 import { api, usd } from "@/lib/api";
-import { DataTable, ErrorBox, Pill, usePoll } from "@/components/ui";
+import { DataTable, ErrorBox, Help, Pill, usePoll } from "@/components/ui";
+import { PAGE } from "@/lib/explainers";
 
 interface AnyPosition {
   ticker: string;
@@ -32,7 +33,9 @@ export default function PositionsPage() {
 
   return (
     <>
-      <h1>Positions</h1>
+      <h1>
+        Positions <Help wide>{PAGE.positions}</Help>
+      </h1>
       <div className="sub">Every open position in both domains.</div>
       <ErrorBox error={error} />
 

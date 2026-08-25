@@ -12,22 +12,77 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError } from "@/lib/api";
 
+/**
+ * A hover explainer.
+ *
+ * Written for someone who has never traded. The rule followed throughout: say
+ * what the number *is* in plain words, then what it means for them, and never
+ * assume a term has been met before. "Spread" is not common knowledge; neither
+ * is "drawdown", "notional", "fill" or "edge".
+ *
+ * Rendered as a real focusable element rather than a bare `title` attribute so
+ * it opens on keyboard focus too, and carries `title` as well so it still works
+ * if CSS fails to load.
+ */
+export function Help({ children, wide }: { children: React.ReactNode; wide?: boolean }) {
+  const text = typeof children === "string" ? children : undefined;
+  return (
+    <span className="help" tabIndex={0} role="note" aria-label={text} title={text}>
+      <span className="help-mark" aria-hidden="true">
+        ?
+      </span>
+      <span className={`help-bubble${wide ? " wide" : ""}`}>{children}</span>
+    </span>
+  );
+}
+
+/**
+ * A page heading with an explainer attached.
+ *
+ * Every page gets one. Someone landing on "Arbitrage" or "Walk-forward" with no
+ * background should be able to read the first two lines and know what they are
+ * looking at and whether it matters.
+ */
+export function PageIntro({
+  title,
+  lede,
+  explain,
+}: {
+  title: string;
+  lede: string;
+  explain: React.ReactNode;
+}) {
+  return (
+    <>
+      <h1>
+        {title} <Help wide>{explain}</Help>
+      </h1>
+      <div className="sub">{lede}</div>
+    </>
+  );
+}
+
 export function Stat({
   label,
   value,
   tone,
   note,
   small,
+  explain,
 }: {
   label: string;
   value: string;
   tone?: "good" | "bad" | "warn";
   note?: string;
   small?: boolean;
+  explain?: React.ReactNode;
 }) {
   return (
     <div className="card">
-      <h3>{label}</h3>
+      <h3>
+        {label}
+        {explain ? <Help>{explain}</Help> : null}
+      </h3>
       <div className={`stat${small ? " sm" : ""}${tone ? ` ${tone}` : ""}`}>{value}</div>
       {note ? <div className="stat-note">{note}</div> : null}
     </div>

@@ -152,3 +152,43 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none;
   border-radius: 50%; background: var(--text); border: 2px solid var(--panel); }
 input[type="range"]::-moz-range-thumb { width: 15px; height: 15px;
   border-radius: 50%; background: var(--text); border: 2px solid var(--panel); }
+
+/* --- hover explainers -----------------------------------------------------
+   Opens on hover and on keyboard focus. The bubble is positioned relative to
+   the marker and clamped to the viewport width on narrow screens, so an
+   explainer near the right edge does not run off the page. */
+.help { position: relative; display: inline-flex; align-items: center;
+  margin-left: 6px; vertical-align: middle; cursor: help; outline: none; }
+.help-mark { display: inline-flex; align-items: center; justify-content: center;
+  width: 14px; height: 14px; border-radius: 50%; font-size: 10px;
+  font-weight: 700; line-height: 1; background: var(--panel-2);
+  color: var(--muted); border: 1px solid var(--border); font-family: var(--mono); }
+.help:hover .help-mark, .help:focus .help-mark { background: var(--accent, #2f6fd0);
+  color: #fff; border-color: var(--accent, #2f6fd0); }
+.help-bubble { position: absolute; bottom: calc(100% + 8px); left: 50%;
+  transform: translateX(-50%); width: max(260px, 22vw); max-width: min(420px, 88vw);
+  background: #0d1119; color: var(--text); border: 1px solid var(--border);
+  border-radius: 7px; padding: 10px 12px; font-size: 12.5px; font-weight: 400;
+  line-height: 1.55; text-transform: none; letter-spacing: 0;
+  box-shadow: 0 8px 24px rgba(0,0,0,.55); opacity: 0; visibility: hidden;
+  transition: opacity .12s ease; z-index: 60; pointer-events: none; text-align: left; }
+.help-bubble.wide { width: max(360px, 30vw); max-width: min(560px, 92vw); }
+.help:hover .help-bubble, .help:focus .help-bubble { opacity: 1; visibility: visible; }
+.help-bubble strong { color: var(--text); }
+.help-bubble em { color: var(--muted); font-style: normal; }
+/* Flip below when the marker sits near the top of the viewport. */
+h1 .help-bubble { bottom: auto; top: calc(100% + 8px); }
+
+/* --- slider default marker ------------------------------------------------
+   The shipped default is marked at its real position on the track. It used to
+   be a word centred under the slider, which implied the default sat mid-range;
+   for a spread limit whose default is 300 in a 50-2000 range that is 13% along,
+   not 50%. */
+.slider-wrap { position: relative; padding-top: 2px; }
+.slider-default { position: absolute; top: 0; width: 1px; height: 26px;
+  background: var(--muted); opacity: .55; pointer-events: none; }
+.slider-default::after { content: "default"; position: absolute; top: 26px;
+  left: 50%; transform: translateX(-50%); font-size: 10px; letter-spacing: .3px;
+  color: var(--muted); white-space: nowrap; }
+.slider-ends { display: flex; justify-content: space-between; font-size: 12px;
+  color: var(--muted); margin-top: 18px; }

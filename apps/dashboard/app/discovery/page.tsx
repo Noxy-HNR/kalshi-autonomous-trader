@@ -9,7 +9,8 @@
  */
 
 import { api, type StrategyRow } from "@/lib/api";
-import { DataTable, ErrorBox, Pill, stateTone, usePoll } from "@/components/ui";
+import { DataTable, ErrorBox, Help, Pill, stateTone, usePoll } from "@/components/ui";
+import { PAGE } from "@/lib/explainers";
 
 const PRE_LIVE = new Set([
   "discovery",
@@ -28,7 +29,9 @@ export default function DiscoveryPage() {
 
   return (
     <>
-      <h1>Strategy discovery</h1>
+      <h1>
+        Strategy discovery <Help wide>{PAGE.discovery}</Help>
+      </h1>
       <div className="sub">
         Candidates working their way up the ladder. Nothing here trades live capital.
       </div>

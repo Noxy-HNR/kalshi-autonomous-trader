@@ -10,7 +10,8 @@
  */
 
 import { api, usd, type StrategyRow } from "@/lib/api";
-import { DataTable, ErrorBox, Pill, stateTone, usePoll } from "@/components/ui";
+import { DataTable, ErrorBox, Help, Pill, stateTone, usePoll } from "@/components/ui";
+import { PAGE } from "@/lib/explainers";
 
 const LADDER = [
   "discovery",
@@ -38,7 +39,9 @@ export default function StrategiesPage() {
 
   return (
     <>
-      <h1>Strategies</h1>
+      <h1>
+        Strategies <Help wide>{PAGE.strategies}</Help>
+      </h1>
       <div className="sub">
         Lifecycle state and performance, reported separately for every stage.
       </div>

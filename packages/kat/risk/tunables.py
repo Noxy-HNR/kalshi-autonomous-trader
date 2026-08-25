@@ -75,11 +75,21 @@ class Tunable:
     kind: Kind
     minimum: Decimal
     maximum: Decimal
-    step: Decimal
+    #: The hover explainer, written for someone who has never traded. It may
+    #: not assume any term: "spread", "edge", "drawdown" and "notional" all
+    #: have to be explained where they are used, not looked up elsewhere.
+    plain: str = ""
+    #: Overrides the per-unit default in _STEP_BY_KIND. Left unset almost
+    #: always: an inconsistent step is what made these feel arbitrary.
+    step_override: Decimal | None = None
     #: True when a larger number means more risk. The dashboard colours the
     #: track by this, so an operator can see which way "riskier" is without
     #: reading each description.
     higher_is_riskier: bool = True
+
+    @property
+    def step(self) -> Decimal:
+        return self.step_override or _STEP_BY_KIND.get(self.kind, Decimal("1"))
 
     def settings_block(self, settings: AppSettings) -> Any:
         return settings.event_risk if self.domain == "event" else settings.perp_risk
@@ -120,6 +130,7 @@ class Tunable:
             "domain": self.domain,
             "label": self.label,
             "description": self.description,
+            "plain": self.plain,
             "kind": self.kind,
             "value": str(self.read(settings)),
             "minimum": str(self.minimum),
@@ -130,12 +141,35 @@ class Tunable:
         }
 
 
+#: Slider granularity, by unit rather than per parameter.
+#:
+#: Hand-picking a step per slider produced an inconsistent feel -- some moved in
+#: half-percent jumps, others in five-percent ones, so dragging two sliders the
+#: same physical distance changed the risk by very different amounts. These are
+#: fine enough to land on a considered number and uniform enough that the
+#: controls behave the same way as each other.
+_STEP_BY_KIND: dict[str, Decimal] = {
+    "percent": Decimal("0.001"),   # 0.1 of a percentage point
+    "cents": Decimal("10"),        # 0.1 of a cent
+    "contracts": Decimal("50"),    # half a contract
+    "usd": Decimal("1"),
+    "count": Decimal("1"),
+    "micros": Decimal("1000"),
+}
+
+
 def _d(value: str) -> Decimal:
     return Decimal(value)
 
 
-#: The adjustable set. Bounds mirror the clamps in kat.config.settings; where
-#: they differ the clamp wins, because it runs on every load.
+#: The adjustable set.
+#:
+#: Bounds are the *usable* range, deliberately narrower than the clamp in
+#: kat.config.settings. A slider whose maximum is 500 open positions or 1000
+#: contracts of depth is technically honest and practically useless: every
+#: sensible value crowds into the left tenth of the track. Someone who genuinely
+#: wants a value beyond these can set it in .env, where the clamp is still the
+#: real limit and still applies.
 TUNABLES: tuple[Tunable, ...] = (
     # -- what makes a market worth trading at all ---------------------------
     Tunable(
@@ -148,10 +182,18 @@ TUNABLES: tuple[Tunable, ...] = (
             "untradeable. The spread is paid on entry and again on exit, so this "
             "is the single largest cost a strategy faces. 300 = 3 cents."
         ),
+        plain=(
+            "Every market has two prices at once: what buyers will pay and what "
+            "sellers will accept. The gap between them is the spread, and you pay it "
+            "twice -- once buying in and once selling out. On a 3-cent spread you "
+            "start about 3 cents behind on every trade and have to be right by more "
+            "than that to make money. Raise this and the platform will trade markets "
+            "where that starting hole is deeper. It does not make those trades "
+            "better; it makes the platform willing to take them."
+        ),
         kind="cents",
-        minimum=_d("1"),
-        maximum=_d("5000"),
-        step=_d("25"),
+        minimum=_d("50"),
+        maximum=_d("2000"),
     ),
     Tunable(
         key="event.min_book_depth_qc",
@@ -163,10 +205,15 @@ TUNABLES: tuple[Tunable, ...] = (
             "enough to enter. 1000 = 10 contracts. Lowering it admits thinner "
             "markets where an exit may not be available at any sensible price."
         ),
+        plain=(
+            "How many contracts other people currently have orders in for. If almost "
+            "nobody is offering to trade, you can usually get IN at a fair price but "
+            "not back OUT -- there is nobody on the other side when you want to sell. "
+            "Lower this and the platform will enter markets it may struggle to leave."
+        ),
         kind="contracts",
-        minimum=_d("1"),
-        maximum=_d("100000"),
-        step=_d("100"),
+        minimum=_d("100"),
+        maximum=_d("10000"),
         higher_is_riskier=False,
     ),
     Tunable(
@@ -179,10 +226,16 @@ TUNABLES: tuple[Tunable, ...] = (
             "on. 200 = 2 cents. Lowering it produces more trades, each with less "
             "margin for the fair-value estimate to be wrong."
         ),
+        plain=(
+            "The platform estimates what a contract is really worth, then compares "
+            "that to the price being asked. The gap is the edge -- how mispriced it "
+            "thinks the market is. This sets how big that gap must be before it acts. "
+            "Lower it and it trades more often on smaller, less certain mispricings, "
+            "where being slightly wrong wipes out the gain."
+        ),
         kind="cents",
-        minimum=_d("1"),
-        maximum=_d("5000"),
-        step=_d("25"),
+        minimum=_d("20"),
+        maximum=_d("1000"),
         higher_is_riskier=False,
     ),
     Tunable(
@@ -194,10 +247,15 @@ TUNABLES: tuple[Tunable, ...] = (
             "How far the price may move against the order between the decision "
             "and the fill before it is abandoned. 100 = 1 cent."
         ),
+        plain=(
+            "Between deciding to trade and the order actually filling, the price can "
+            "move. Slippage is how much worse than expected you ended up paying. This "
+            "is how much of that the platform will tolerate before giving up on the "
+            "order instead of chasing a price that is running away."
+        ),
         kind="cents",
         minimum=_d("0"),
-        maximum=_d("5000"),
-        step=_d("25"),
+        maximum=_d("500"),
     ),
     # -- how much may be at stake -------------------------------------------
     Tunable(
@@ -210,10 +268,16 @@ TUNABLES: tuple[Tunable, ...] = (
             "equity. 0.10 = 10%. This is the main concentration control: at 0.25 "
             "four bad markets can account for the whole balance."
         ),
+        plain=(
+            "How much of your account can ride on any single market. At 10%, one "
+            "market going completely against you costs at most a tenth of the "
+            "balance. At 25% you only need four bad ones to lose everything. This is "
+            "the single most important control against being wrong about one thing in "
+            "a big way."
+        ),
         kind="percent",
         minimum=_d("0.001"),
         maximum=_d("0.25"),
-        step=_d("0.005"),
     ),
     Tunable(
         key="event.max_portfolio_exposure_pct",
@@ -225,10 +289,15 @@ TUNABLES: tuple[Tunable, ...] = (
             "position at once. 0.60 = 60%. The remainder is the buffer that "
             "absorbs adverse moves without forcing an exit."
         ),
+        plain=(
+            "How much of your account can be committed to trades all at once, across "
+            "every market together. The rest stays as cash. That cash is not idle -- "
+            "it is what lets positions move against you for a while without forcing "
+            "you to sell at the worst moment."
+        ),
         kind="percent",
         minimum=_d("0.01"),
         maximum=_d("0.95"),
-        step=_d("0.05"),
     ),
     Tunable(
         key="event.max_order_notional_usd",
@@ -240,10 +309,15 @@ TUNABLES: tuple[Tunable, ...] = (
             "percentage limits. It is the backstop for an equity figure that is "
             "wrong: a percentage of a bad number is still a bad number."
         ),
+        plain=(
+            "A hard dollar ceiling on any one order, no matter what the percentages "
+            "allow. It exists for the case where the account balance is read wrong: a "
+            "percentage of a wrong number is still a wrong number, and this catches "
+            "it."
+        ),
         kind="usd",
-        minimum=_d("0.01"),
-        maximum=_d("10000"),
-        step=_d("5"),
+        minimum=_d("1"),
+        maximum=_d("500"),
     ),
     # -- when to stop --------------------------------------------------------
     Tunable(
@@ -255,10 +329,14 @@ TUNABLES: tuple[Tunable, ...] = (
             "The most a single trade may be allowed to lose, as a fraction of "
             "equity. 0.02 = 2%."
         ),
+        plain=(
+            "How much of the account a single trade is allowed to lose before it is "
+            "closed. Think of it as the size of the individual mistakes you are "
+            "willing to make."
+        ),
         kind="percent",
         minimum=_d("0.001"),
         maximum=_d("0.10"),
-        step=_d("0.005"),
     ),
     Tunable(
         key="event.max_daily_loss_pct",
@@ -270,10 +348,15 @@ TUNABLES: tuple[Tunable, ...] = (
             "session. 0.05 = 5%. This is the control that stops a bad day "
             "becoming a bad week."
         ),
+        plain=(
+            "If losses reach this much in one day, the platform stops opening new "
+            "trades until tomorrow. This is what stops a bad morning turning into a "
+            "bad month: the most common way automated systems fail is trading harder "
+            "to win losses back."
+        ),
         kind="percent",
         minimum=_d("0.005"),
         maximum=_d("0.25"),
-        step=_d("0.005"),
     ),
     Tunable(
         key="event.max_drawdown_pct",
@@ -284,10 +367,15 @@ TUNABLES: tuple[Tunable, ...] = (
             "How far below the account's high-water mark equity may fall before "
             "trading stops entirely. 0.20 = 20%."
         ),
+        plain=(
+            "Drawdown is how far the account has fallen from its best-ever value. If "
+            "it was $500 at its peak and is $400 now, that is a 20% drawdown. Reach "
+            "this number and the platform stops trading entirely and waits for you. "
+            "It is the final backstop, not a routine limit."
+        ),
         kind="percent",
         minimum=_d("0.01"),
         maximum=_d("0.50"),
-        step=_d("0.01"),
     ),
     Tunable(
         key="event.max_open_positions",
@@ -298,10 +386,15 @@ TUNABLES: tuple[Tunable, ...] = (
             "How many markets may be held at once. More positions spread risk "
             "but also spread attention, and each one pays the spread twice."
         ),
+        plain=(
+            "How many markets can be held at the same time. Spreading across more "
+            "markets means no single one can hurt much -- but each one costs the "
+            "spread to enter and exit, so holding many small positions can bleed "
+            "money in fees alone."
+        ),
         kind="count",
         minimum=_d("1"),
-        maximum=_d("500"),
-        step=_d("1"),
+        maximum=_d("100"),
     ),
     Tunable(
         key="event.max_orders_per_minute",
@@ -312,10 +405,14 @@ TUNABLES: tuple[Tunable, ...] = (
             "A ceiling on orders per minute. It bounds the damage a malfunction "
             "can do before anyone notices it."
         ),
+        plain=(
+            "A speed limit on orders. Not a trading strategy -- a safety catch. If "
+            "something malfunctions, this bounds how much damage it can do in the "
+            "minutes before anyone notices."
+        ),
         kind="count",
         minimum=_d("1"),
-        maximum=_d("600"),
-        step=_d("5"),
+        maximum=_d("120"),
     ),
     # -- perpetuals ----------------------------------------------------------
     Tunable(
@@ -329,10 +426,14 @@ TUNABLES: tuple[Tunable, ...] = (
             "leverage ceiling: this can only make the platform more "
             "conservative, never less."
         ),
+        plain=(
+            "How much of the account can be committed to perpetual futures at once. "
+            "Separate from the 1.00x leverage ceiling and always weaker than it: this "
+            "can only make the platform more cautious, never less."
+        ),
         kind="percent",
         minimum=_d("0.01"),
         maximum=_d("1.00"),
-        step=_d("0.05"),
     ),
     Tunable(
         key="perp.max_position_pct_equity",
@@ -340,10 +441,13 @@ TUNABLES: tuple[Tunable, ...] = (
         field="max_position_pct_equity",
         label="Largest perpetual position",
         description="The most of the account one perpetual market may hold.",
+        plain=(
+            "How much of the account can ride on a single perpetual market. Same idea "
+            "as the event-contract position limit, applied to the other domain."
+        ),
         kind="percent",
         minimum=_d("0.001"),
         maximum=_d("0.50"),
-        step=_d("0.005"),
     ),
     Tunable(
         key="perp.max_spread_cc",
@@ -351,10 +455,14 @@ TUNABLES: tuple[Tunable, ...] = (
         field="max_spread_cc",
         label="Widest perpetual spread",
         description="How far apart bid and ask may be on a perpetual before it is skipped.",
+        plain=(
+            "The gap between the buying and selling price on a perpetual, which you "
+            "pay on the way in and again on the way out. Same meaning as the "
+            "event-contract spread limit."
+        ),
         kind="cents",
-        minimum=_d("1"),
-        maximum=_d("5000"),
-        step=_d("25"),
+        minimum=_d("50"),
+        maximum=_d("2000"),
     ),
     Tunable(
         key="perp.max_daily_loss_pct",
@@ -362,10 +470,14 @@ TUNABLES: tuple[Tunable, ...] = (
         field="max_daily_loss_pct",
         label="Perpetual daily loss limit",
         description="Losses on perpetuals in one day beyond this halt new entries.",
+        plain=(
+            "If perpetual trading loses this much in one day, it stops opening new "
+            "positions until tomorrow. Counted separately from event contracts, so a "
+            "bad day in one domain does not halt the other."
+        ),
         kind="percent",
         minimum=_d("0.005"),
         maximum=_d("0.25"),
-        step=_d("0.005"),
     ),
 )
 
@@ -403,6 +515,18 @@ def locked_parameters() -> list[dict[str, Any]]:
                 "parameter, verified by behavioural canaries before every "
                 "enforcement call. No configuration file, dashboard control, "
                 "strategy, model or recovery path can raise it."
+            ),
+            "plain": (
+                "Leverage means trading with borrowed money. At 2x you control "
+                "$200 of position with $100 of your own, so a 50% move against "
+                "you does not halve your account -- it empties it. At 1x you can "
+                "only ever put up money you actually have, so a position can "
+                "lose value but cannot leave you owing more than you put in. "
+                "This platform will not exceed 1x, and unlike everything else on "
+                "this page there is no number here to change: the check is a "
+                "comparison between what a trade would cost and what the account "
+                "holds, and it refuses anything larger. No setting, strategy or "
+                "model can reach past it."
             ),
             "kind": "leverage",
             "value": str(MAX_PERP_LEVERAGE),

@@ -16,7 +16,8 @@
 
 import { useState } from "react";
 import { api, type ControlState } from "@/lib/api";
-import { ErrorBox, Pill, usePoll } from "@/components/ui";
+import { ErrorBox, Help, Pill, usePoll } from "@/components/ui";
+import { PAGE } from "@/lib/explainers";
 
 const SCOPE_HELP: Record<string, string> = {
   global: "Stops all trading in both domains.",
@@ -51,7 +52,9 @@ export default function ControlsPage() {
 
   return (
     <>
-      <h1>Controls</h1>
+      <h1>
+        Controls <Help wide>{PAGE.controls}</Help>
+      </h1>
       <div className="sub">
         Operating mode, trading halt, and the kill switches. Every action is audited.
       </div>

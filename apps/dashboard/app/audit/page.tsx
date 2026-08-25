@@ -10,7 +10,8 @@
 
 import { useState } from "react";
 import { api, timeAgo, type AuditRow, type Decision } from "@/lib/api";
-import { DataTable, ErrorBox, Pill, usePoll } from "@/components/ui";
+import { DataTable, ErrorBox, Help, Pill, usePoll } from "@/components/ui";
+import { PAGE } from "@/lib/explainers";
 
 export default function AuditPage() {
   const [tab, setTab] = useState<"decisions" | "audit">("decisions");
@@ -22,7 +23,9 @@ export default function AuditPage() {
 
   return (
     <>
-      <h1>Audit log</h1>
+      <h1>
+        Audit log <Help wide>{PAGE.audit}</Help>
+      </h1>
       <div className="sub">Every considered trade and every control action, with reasoning.</div>
       <ErrorBox error={error} />
 

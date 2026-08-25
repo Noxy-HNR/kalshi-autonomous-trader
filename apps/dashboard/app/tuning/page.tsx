@@ -19,9 +19,9 @@
  * page is a convenience over the limits rather than the thing enforcing them.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, type Tunable } from "@/lib/api";
-import { ErrorBox, Pill } from "@/components/ui";
+import { ErrorBox, Help, PageIntro, Pill } from "@/components/ui";
 
 /** Human-readable rendering of a raw value, by unit. */
 function display(t: Tunable, raw: string): string {
@@ -32,8 +32,10 @@ function display(t: Tunable, raw: string): string {
       return `${(n * 100).toFixed(n < 0.01 ? 2 : 1)}%`;
     case "cents":
       return `${(n / 100).toFixed(2)}¢`;
-    case "contracts":
-      return `${(n / 100).toFixed(0)} contracts`;
+    case "contracts": {
+      const c = n / 100;
+      return `${c.toFixed(c < 10 && c % 1 !== 0 ? 1 : 0)} contract${c === 1 ? "" : "s"}`;
+    }
     case "usd":
       return `$${n.toFixed(2)}`;
     case "leverage":
@@ -55,6 +57,15 @@ function display(t: Tunable, raw: string): string {
  * defaults are cautious rather than maximally cautious and there is room to
  * tighten below them.
  */
+/** Where a value sits between this slider's bounds, 0..1. */
+function fraction(t: Tunable, raw: string): number {
+  const lo = Number(t.minimum);
+  const hi = Number(t.maximum);
+  const v = Number(raw);
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi === lo) return 0;
+  return Math.min(1, Math.max(0, (v - lo) / (hi - lo)));
+}
+
 const DEFAULT_LEVEL = 0.3;
 
 function riskLevel(t: Tunable, raw: string): number {
@@ -163,6 +174,35 @@ export default function TuningPage() {
     }
   }
 
+  /**
+   * Save shortly after the drag stops, rather than immediately.
+   *
+   * The delay is what makes double-click-to-reset possible at all: the two
+   * clicks of a double-click each end with a mouseup, so committing on mouseup
+   * would fire two saves for the click position before the reset was even
+   * detected. The pending save is cancelled when a double-click arrives.
+   */
+  const pending = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+
+  const scheduleCommit = useCallback((t: Tunable, value: string) => {
+    clearTimeout(pending.current[t.key]);
+    pending.current[t.key] = setTimeout(() => void commit(t, value), 260);
+  }, []);
+
+  const resetToDefault = useCallback((t: Tunable) => {
+    clearTimeout(pending.current[t.key]);
+    setDraft((d) => ({ ...d, [t.key]: t.default }));
+    void commit(t, t.default);
+  }, []);
+
+  // A save in flight when the page unmounts should not fire afterwards.
+  useEffect(() => {
+    const timers = pending.current;
+    return () => {
+      for (const id of Object.values(timers)) clearTimeout(id);
+    };
+  }, []);
+
   const shown = useMemo(
     () => tunables.filter((t) => t.domain === domain),
     [tunables, domain],
@@ -177,12 +217,27 @@ export default function TuningPage() {
 
   return (
     <>
-      <h1>Risk tuning</h1>
-      <div className="sub">
-        Every change here takes effect immediately on the running platform, is written to
-        the audit log, and survives a restart. There is no apply button because there is
-        no draft — what you see is what is in force.
-      </div>
+      <PageIntro
+        title="Risk tuning"
+        lede="Every change takes effect immediately, is written to the audit log, and survives a restart. There is no apply button because there is no draft — what you see is what is in force."
+        explain={
+          <>
+            <strong>These sliders decide how cautious the platform is.</strong> Each one
+            is a limit it will not cross: how bad a price it will accept, how much of
+            your money one trade can use, how much it may lose before stopping.
+            <br />
+            <br />
+            Moving a slider right generally means <em>more risk taken, more trades
+            made</em>. That is not the same as more money made — most of these limits
+            exist because the cheapest way to lose money is to trade too often, too
+            large, or at bad prices.
+            <br />
+            <br />
+            Drag to change. <strong>Double-click any slider to put it back to the
+            default.</strong> The small tick on each track marks where that default sits.
+          </>
+        }
+      />
       <ErrorBox error={error} />
 
       <div className="row" style={{ gap: 8, margin: "12px 0" }}>
@@ -241,7 +296,10 @@ export default function TuningPage() {
                     className="row"
                     style={{ justifyContent: "space-between", alignItems: "baseline" }}
                   >
-                    <strong>{t.label}</strong>
+                    <strong>
+                      {t.label}
+                      {t.plain ? <Help wide>{t.plain}</Help> : null}
+                    </strong>
                     <span className="row" style={{ gap: 8, alignItems: "center" }}>
                       <code style={{ fontSize: 15 }}>{display(t, value)}</code>
                       <Pill tone={riskTone(level)}>
@@ -250,36 +308,49 @@ export default function TuningPage() {
                     </span>
                   </div>
                   <div className="sub" style={{ margin: "6px 0 10px" }}>{t.description}</div>
-                  <input
-                    type="range"
-                    min={t.minimum}
-                    max={t.maximum}
-                    step={t.step}
-                    value={value}
-                    disabled={busy === t.key}
-                    onChange={(e) =>
-                      setDraft((d) => ({ ...d, [t.key]: e.target.value }))
-                    }
-                    onMouseUp={(e) => commit(t, (e.target as HTMLInputElement).value)}
-                    onKeyUp={(e) => {
-                      if (e.key.startsWith("Arrow"))
-                        commit(t, (e.target as HTMLInputElement).value);
-                    }}
-                    onTouchEnd={(e) => commit(t, (e.target as HTMLInputElement).value)}
-                    style={{ width: "100%" }}
-                  />
+                  {/* The double-click handler sits on the wrapper, not the input.
+                      The input is never disabled during a save either: a disabled
+                      element fires no dblclick at all, so the first attempt at this
+                      silently did nothing but re-apply the click position. */}
                   <div
-                    className="row"
-                    style={{ justifyContent: "space-between", fontSize: 12, opacity: 0.7 }}
+                    className="slider-wrap"
+                    onDoubleClick={() => resetToDefault(t)}
                   >
+                    <input
+                      type="range"
+                      min={t.minimum}
+                      max={t.maximum}
+                      step={t.step}
+                      value={value}
+                      aria-label={`${t.label}, currently ${display(t, value)}`}
+                      title="Drag to change. Double-click to reset to the default."
+                      onChange={(e) =>
+                        setDraft((d) => ({ ...d, [t.key]: e.target.value }))
+                      }
+                      onMouseUp={(e) => scheduleCommit(t, (e.target as HTMLInputElement).value)}
+                      onKeyUp={(e) => {
+                        if (e.key.startsWith("Arrow"))
+                          scheduleCommit(t, (e.target as HTMLInputElement).value);
+                      }}
+                      onTouchEnd={(e) => scheduleCommit(t, (e.target as HTMLInputElement).value)}
+                      style={{ width: "100%" }}
+                    />
+                    {/* Marked at the default's real position on the track. */}
+                    <span
+                      className="slider-default"
+                      style={{ left: `${fraction(t, t.default) * 100}%` }}
+                      aria-hidden="true"
+                    />
+                  </div>
+                  <div className="slider-ends">
                     <span>{display(t, t.minimum)}</span>
-                    {dirty ? (
-                      <span>saving…</span>
-                    ) : value === t.default ? (
-                      <span>default</span>
-                    ) : (
-                      <span>changed from {display(t, t.default)}</span>
-                    )}
+                    <span>
+                      {dirty
+                        ? "saving…"
+                        : value === t.default
+                          ? "at the default"
+                          : `changed from ${display(t, t.default)} — double-click to reset`}
+                    </span>
                     <span>{display(t, t.maximum)}</span>
                   </div>
                 </div>
@@ -301,7 +372,10 @@ export default function TuningPage() {
                 className="row"
                 style={{ justifyContent: "space-between", alignItems: "baseline" }}
               >
-                <strong>{t.label}</strong>
+                <strong>
+                  {t.label}
+                  {t.plain ? <Help wide>{t.plain}</Help> : null}
+                </strong>
                 <span className="row" style={{ gap: 8, alignItems: "center" }}>
                   <code style={{ fontSize: 18 }}>{display(t, t.value)}</code>
                   <Pill tone="good">locked</Pill>

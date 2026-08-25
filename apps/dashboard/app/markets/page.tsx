@@ -8,7 +8,8 @@
  */
 
 import { api, contracts, type MarketRow } from "@/lib/api";
-import { DataTable, ErrorBox, Pill, usePoll } from "@/components/ui";
+import { DataTable, ErrorBox, Help, Pill, usePoll } from "@/components/ui";
+import { PAGE } from "@/lib/explainers";
 
 export default function MarketsPage() {
   const { data, error } = usePoll<{ markets: MarketRow[]; count: number }>(
@@ -20,7 +21,9 @@ export default function MarketsPage() {
 
   return (
     <>
-      <h1>Markets</h1>
+      <h1>
+        Markets <Help wide>{PAGE.markets}</Help>
+      </h1>
       <div className="sub">Spreads, depth, volume and data freshness across both domains.</div>
       <ErrorBox error={error} />
 

@@ -5,7 +5,8 @@
  */
 
 import { api, timeAgo, type RiskEventRow } from "@/lib/api";
-import { DataTable, ErrorBox, Pill, usePoll } from "@/components/ui";
+import { DataTable, ErrorBox, Help, Pill, usePoll } from "@/components/ui";
+import { PAGE } from "@/lib/explainers";
 
 type Limits = Record<string, unknown>;
 
@@ -16,7 +17,9 @@ export default function RiskPage() {
 
   return (
     <>
-      <h1>Risk</h1>
+      <h1>
+        Risk <Help wide>{PAGE.risk}</Help>
+      </h1>
       <div className="sub">Limits, current utilisation, remaining capacity and triggers.</div>
       <ErrorBox error={error} />
 

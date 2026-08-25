@@ -9,7 +9,8 @@
 
 import { useState } from "react";
 import { api, timeAgo, usd, type OrderRow } from "@/lib/api";
-import { DataTable, ErrorBox, Pill, stateTone, usePoll } from "@/components/ui";
+import { DataTable, ErrorBox, Help, Pill, stateTone, usePoll } from "@/components/ui";
+import { PAGE } from "@/lib/explainers";
 
 const STATES = [
   "created",
@@ -34,7 +35,9 @@ export default function OrdersPage() {
 
   return (
     <>
-      <h1>Orders</h1>
+      <h1>
+        Orders <Help wide>{PAGE.orders}</Help>
+      </h1>
       <div className="sub">
         Submissions, acknowledgements, fills, rejections, slippage and latency.
       </div>
