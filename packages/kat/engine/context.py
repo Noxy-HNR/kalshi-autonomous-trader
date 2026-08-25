@@ -36,6 +36,9 @@ from kat.observability.logging import get_logger
 from kat.observability.metrics import metrics
 from kat.risk.invariants import MAX_PERP_LEVERAGE
 
+#: system_state key holding operator-adjusted risk limits.
+RISK_OVERRIDES_KEY = "risk_overrides"
+
 if TYPE_CHECKING:
     from kat.engine.lifecycle import Application
     from kat.engine.trading import TradingLoop
@@ -249,6 +252,122 @@ class EngineContext:
             detail={"from": previous.value, "to": mode.value, "actor": actor},
             severity="warning",
         )
+
+    async def set_risk_tunable(
+        self, key: str, value: Any, *, actor: str = "dashboard"
+    ) -> dict[str, Any]:
+        """Adjust one risk limit on the running platform.
+
+        Applied live, audited, and persisted, in that order. Persisting last is
+        deliberate: a value that could not be applied must not be written down
+        as though it had been.
+
+        Raises :class:`~kat.risk.tunables.TunableError` for an unknown key or an
+        out-of-range value. The perpetual leverage ceiling is not a key here and
+        never can be -- there is no number behind it to set.
+        """
+        from kat.risk.tunables import apply_override, tunable_by_key
+
+        if self.app is None:
+            raise RuntimeError("application is not running")
+
+        tunable = tunable_by_key(key)
+        previous, applied = apply_override(self.app.settings, key, value)
+
+        log.warning(
+            "control.risk_tunable_changed",
+            actor=actor, key=key, previous=str(previous), applied=str(applied),
+            requested=str(value),
+        )
+        self.app._audit(
+            "risk_tunable_changed",
+            subject=key,
+            detail={
+                "key": key,
+                "label": tunable.label,
+                "from": str(previous),
+                "to": str(applied),
+                # Recorded separately because pydantic clamps on assignment, so
+                # what was asked for and what took effect are not always equal.
+                "requested": str(value),
+                "actor": actor,
+            },
+            severity="warning",
+        )
+        await self._persist_risk_overrides()
+        return {
+            "key": key,
+            "previous": str(previous),
+            "value": str(applied),
+            "requested": str(value),
+            "clamped": str(applied) != str(value),
+        }
+
+    async def _persist_risk_overrides(self) -> None:
+        """Write every non-default tunable so a restart does not revert them.
+
+        A risk limit that quietly returns to its default overnight is worse than
+        one that was never changed: the operator believes a bound is in force
+        that is not.
+        """
+
+        from kat.config.settings import AppSettings
+        from kat.db.models import SystemState
+        from kat.risk.tunables import TUNABLES
+
+        if self.app is None or self.app.database is None:
+            return
+
+        defaults = AppSettings()
+        overrides = {
+            t.key: str(t.read(self.app.settings))
+            for t in TUNABLES
+            if t.read(self.app.settings) != t.read(defaults)
+        }
+        try:
+            async with self.app.database.session() as session:
+                await session.merge(
+                    SystemState(
+                        key=RISK_OVERRIDES_KEY, value=overrides, updated_by="dashboard"
+                    )
+                )
+        except Exception as exc:
+            # The change is already live; failing to write it down is worth
+            # shouting about but must not undo it.
+            log.error("control.risk_overrides_not_persisted", error=str(exc))
+
+    async def load_risk_overrides(self) -> int:
+        """Re-apply persisted tunables at start-up. Returns how many were applied."""
+        from sqlalchemy import select
+
+        from kat.db.models import SystemState
+        from kat.risk.tunables import TunableError, apply_override
+
+        if self.app is None or self.app.database is None:
+            return 0
+        try:
+            async with self.app.database.session() as session:
+                row = (
+                    await session.execute(
+                        select(SystemState).where(SystemState.key == RISK_OVERRIDES_KEY)
+                    )
+                ).scalar_one_or_none()
+        except Exception as exc:
+            log.error("control.risk_overrides_unreadable", error=str(exc))
+            return 0
+
+        stored = (row.value if row else None) or {}
+        applied = 0
+        for key, value in stored.items():
+            try:
+                _, took = apply_override(self.app.settings, key, value)
+                applied += 1
+                log.info("control.risk_override_restored", key=key, value=str(took))
+            except TunableError as exc:
+                # A key that no longer exists, or a bound that has since
+                # tightened. Skipped loudly rather than blocking start-up.
+                log.warning("control.risk_override_discarded", key=key, error=str(exc))
+        return applied
 
     async def engage_kill_switch(
         self, scope: KillSwitchScope, *, reason: str, actor: str = "dashboard", subject: str = ""

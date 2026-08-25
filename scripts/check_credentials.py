@@ -114,7 +114,7 @@ async def check_live() -> bool:
 
     settings = get_settings()
     signer = KalshiSigner.from_credentials(
-        settings.kalshi.event_credentials, label="event"
+        settings.kalshi.active_credentials, label="event"
     )
     client = KalshiHTTPClient(
         base_url=settings.kalshi.rest_base_url,
@@ -145,7 +145,10 @@ async def main() -> int:
     print("=" * 70)
     print("  Kalshi credential check")
     print("=" * 70)
+    exchange = "PRODUCTION" if kalshi.reads_production else "demo"
     print(f"  environment : {settings.environment.value}")
+    print(f"  exchange    : {exchange}")
+    print(f"  credentials : {'prod_credentials' if kalshi.reads_production else 'event_credentials'}")
     print(f"  API base    : {kalshi.rest_base_url}")
     print()
 
@@ -156,14 +159,15 @@ async def main() -> int:
             "  but no order will ever be sent in this mode.\n"
         )
 
-    creds = kalshi.event_credentials
+    creds = kalshi.active_credentials
     ok = True
 
     if creds.api_key_id:
         print(f"[{OK}] event api_key_id is set: {mask(creds.api_key_id)}")
     else:
-        print(f"[{BAD}] event api_key_id is empty")
-        print("        Set KAT_KALSHI__EVENT_CREDENTIALS__API_KEY_ID in .env")
+        block = "PROD" if kalshi.reads_production else "EVENT"
+        print(f"[{BAD}] {block.lower()} api_key_id is empty")
+        print(f"        Set KAT_KALSHI__{block}_CREDENTIALS__API_KEY_ID in .env")
         ok = False
 
     key_ok, _ = check_key_file(creds.private_key_path, "event")

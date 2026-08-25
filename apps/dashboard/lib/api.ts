@@ -317,6 +317,29 @@ export interface SystemStatus {
 
 // --- endpoints --------------------------------------------------------------
 
+export interface Tunable {
+  key: string;
+  domain: string;
+  label: string;
+  description: string;
+  kind: string;
+  value: string;
+  default: string;
+  minimum: string;
+  maximum: string;
+  step: string;
+  higher_is_riskier: boolean;
+  locked: boolean;
+}
+
+export interface TunableChange {
+  key: string;
+  previous: string;
+  value: string;
+  requested: string;
+  clamped: boolean;
+}
+
 export const api = {
   overview: () => get<Overview>("/overview"),
   health: () => get<Health>("/health"),
@@ -343,6 +366,9 @@ export const api = {
   decision: (id: string) => get<Record<string, unknown>>(`/decisions/${id}`),
 
   riskEvents: () => get<{ events: RiskEventRow[] }>("/risk/events"),
+  tunables: () => get<{ tunables: Tunable[] }>("/risk/tunables"),
+  setTunable: (key: string, value: string, actor = "dashboard") =>
+    post<TunableChange>("/risk/tunables", { key, value, actor }),
   riskLimits: () => get<Record<string, unknown>>("/risk/limits"),
   audit: (hours = 24) => get<{ entries: AuditRow[] }>(`/audit?hours=${hours}`),
 

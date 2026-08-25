@@ -112,10 +112,10 @@ class Platform:
         kalshi = self.settings.kalshi
 
         event_signer = None
-        if kalshi.event_credentials.configured:
+        if kalshi.active_credentials.configured:
             try:
                 event_signer = KalshiSigner.from_credentials(
-                    kalshi.event_credentials, label="event"
+                    kalshi.active_credentials, label="event"
                 )
                 log.info("kalshi.event_credentials_loaded", signer=repr(event_signer))
             except ConfigError as exc:
@@ -176,7 +176,7 @@ class Platform:
             self.app.add_block("kalshi", f"Kalshi is unreachable: {exc}")
 
         # Real tier budgets, so the limiter stops guessing.
-        if self.settings.kalshi.event_credentials.configured:
+        if self.settings.kalshi.active_credentials.configured:
             try:
                 limits = await self.event_rest.get_account_limits()
                 read, write = limits.get("read") or {}, limits.get("write") or {}
@@ -437,6 +437,13 @@ class Platform:
             ServiceComponent("reconciliation", start=self._reconcile_once, run=self._reconcile_loop)
         )
 
+        # Before anything trades: an operator-adjusted risk limit must be in
+        # force from the first cycle, not from whenever the dashboard is next
+        # opened. Registered ahead of the trading loops for that reason.
+        self.app.register(
+            ServiceComponent("risk-overrides", start=self._restore_risk_overrides)
+        )
+
         for market_type, loop in self.context.loops.items():
             if market_type is MarketType.PERP and not self.perps_enabled:
                 continue
@@ -503,6 +510,16 @@ class Platform:
         )
 
     # -- component bodies ----------------------------------------------------
+
+    async def _restore_risk_overrides(self) -> None:
+        """Re-apply risk limits the operator changed in a previous run."""
+        applied = await self.context.load_risk_overrides()
+        if applied:
+            log.warning(
+                "risk.overrides_restored",
+                count=applied,
+                note="risk limits differ from the shipped defaults",
+            )
 
     def _scan_arbitrage(self, now_ms: int) -> list[Any]:
         """One arbitrage pass, converted to intents.

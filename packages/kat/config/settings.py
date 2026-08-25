@@ -96,6 +96,26 @@ class KalshiSettings(BaseSettings):
     event_credentials: KalshiCredentials = Field(default_factory=KalshiCredentials)
     perp_credentials: KalshiCredentials = Field(default_factory=KalshiCredentials)
 
+    #: Production identity, used only when the platform is reading the
+    #: production exchange. Kept separate from the demo credentials rather than
+    #: swapped in and out of the same field, because "which key is currently in
+    #: event_credentials" is exactly the question nobody should have to answer
+    #: from memory before starting a trading process.
+    prod_credentials: KalshiCredentials = Field(default_factory=KalshiCredentials)
+
+    #: Read production market data while still in PAPER.
+    #:
+    #: The demo exchange has almost no liquidity -- measured on it, 945 of 1000
+    #: markets had no orders at all and the tightest spread among the rest was
+    #: 13 cents -- so paper trading against demo data cannot tell you anything
+    #: about whether a strategy works. This points the market-data feed at
+    #: production while leaving order routing exactly as it was.
+    #:
+    #: It is safe by construction rather than by care: PAPER never constructs an
+    #: order at all, and this flag is *ignored* unless the environment is PAPER.
+    #: It cannot be the reason a real order is sent, in any combination.
+    read_production_market_data: bool = False
+
     # Client tuning. These affect latency and reliability, never safety.
     request_timeout_s: float = Field(default=8.0, ge=0.5, le=60.0)
     connect_timeout_s: float = Field(default=4.0, ge=0.5, le=30.0)
@@ -121,10 +141,33 @@ class KalshiSettings(BaseSettings):
     # -- derived endpoints ---------------------------------------------------
 
     @property
+    def reads_production(self) -> bool:
+        """Whether market data comes from the production exchange.
+
+        Two ways to be true: trading live, or explicitly asking for production
+        data while in PAPER. The second is deliberately restricted to PAPER --
+        in DEMO the platform really does send orders, and it must send them to
+        the same exchange it priced them from.
+        """
+        if self.environment is TradingEnvironment.LIVE:
+            return True
+        return (
+            self.read_production_market_data
+            and self.environment is TradingEnvironment.PAPER
+        )
+
+    @property
     def _is_demo(self) -> bool:
-        # PAPER never sends orders anywhere, but it still reads live market data,
-        # and it reads it from demo unless explicitly told to trade live.
-        return self.environment is not TradingEnvironment.LIVE
+        return not self.reads_production
+
+    @property
+    def active_credentials(self) -> KalshiCredentials:
+        """The identity to authenticate with, given where we are reading.
+
+        Kalshi does not share credentials between the demo and production
+        exchanges, so this follows the exchange rather than the environment.
+        """
+        return self.prod_credentials if self.reads_production else self.event_credentials
 
     @property
     def rest_base_url(self) -> str:
@@ -459,7 +502,7 @@ class AppSettings(BaseSettings):
     def redacted(self) -> dict[str, Any]:
         """Config dump with secrets removed, safe for logs and the dashboard."""
         data = self.model_dump(mode="json")
-        for domain in ("event_credentials", "perp_credentials"):
+        for domain in ("event_credentials", "perp_credentials", "prod_credentials"):
             block = data.get("kalshi", {}).get(domain, {})
             if block.get("api_key_id"):
                 block["api_key_id"] = _mask(block["api_key_id"])

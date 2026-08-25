@@ -34,6 +34,7 @@ import orjson
 from kat.common.errors import ExchangeError, RateLimited
 from kat.common.ids import current_correlation_id
 from kat.kalshi.auth import KalshiSigner
+from kat.kalshi.forbidden import assert_endpoint_permitted
 from kat.kalshi.ratelimit import RateLimiter
 from kat.observability.logging import get_logger
 from kat.observability.metrics import (
@@ -133,6 +134,10 @@ class KalshiHTTPClient:
         max_wait_s:
             Give up rather than wait longer than this for rate-limit tokens.
         """
+        # Before authentication, before the rate limiter, before anything that
+        # could partially happen. A refused call never even produces a signature.
+        assert_endpoint_permitted(method, path)
+
         if idempotent is None:
             idempotent = method in ("GET", "DELETE")
 

@@ -30,6 +30,7 @@ const SECTIONS: Array<{ group: string; items: Array<[string, string]> }> = [
     items: [
       ["/risk", "Risk"],
       ["/controls", "Controls"],
+      ["/tuning", "Risk Tuning"],
       ["/system", "System"],
       ["/audit", "Audit Log"],
     ],

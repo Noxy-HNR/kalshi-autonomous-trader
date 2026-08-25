@@ -44,6 +44,7 @@ from kat.db.models import (
 from kat.engine.context import get_context
 from kat.observability.logging import get_logger
 from kat.risk.invariants import MAX_PERP_LEVERAGE
+from kat.risk.tunables import TunableError, current_values
 
 log = get_logger(__name__)
 
@@ -776,6 +777,44 @@ async def set_mode(request: ModeRequest) -> dict[str, Any]:
     """Change autonomy mode. Affects no risk limit."""
     await get_context().set_operating_mode(request.mode, actor=request.actor)
     return {"operating_mode": request.mode.value}
+
+
+@api.get("/risk/tunables")
+async def risk_tunables() -> dict[str, Any]:
+    """Every adjustable risk limit, plus the ones that are not adjustable.
+
+    Locked entries are returned in the same list rather than omitted, so the
+    dashboard shows the leverage ceiling beside the sliders instead of leaving a
+    reader to wonder where it went.
+    """
+    ctx = get_context()
+    if ctx.app is None:
+        raise HTTPException(status_code=503, detail="application is not running")
+    return {"tunables": current_values(ctx.app.settings)}
+
+
+class TunableRequest(BaseModel):
+    key: str
+    value: str | float | int
+    actor: str = "dashboard"
+
+
+@api.post("/risk/tunables")
+async def set_risk_tunable(request: TunableRequest) -> dict[str, Any]:
+    """Adjust one risk limit. Applied live, audited, and persisted.
+
+    A refusal returns 400 with the reason, because "that value is outside the
+    permitted range" is something the operator needs to read, not a generic
+    failure.
+    """
+    try:
+        return await get_context().set_risk_tunable(
+            request.key, request.value, actor=request.actor
+        )
+    except TunableError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @api.post("/control/pause")
