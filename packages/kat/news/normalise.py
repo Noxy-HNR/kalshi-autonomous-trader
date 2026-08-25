@@ -54,7 +54,9 @@ __all__ = ["content_hash", "normalise", "simhash", "simhash_distance"]
 
 _TAG = re.compile(r"<[^>]+>")
 _WHITESPACE = re.compile(r"\s+")
-_TOKEN = re.compile(r"[a-z0-9']+")
+# Decimals are kept whole: splitting "4.25" into "4" and "25" loses the number,
+# and a number is very often the entire difference between two headlines.
+_TOKEN = re.compile(r"[a-z]+(?:'[a-z]+)*|\d+(?:[.,]\d+)*")
 
 #: Trailing furniture wire services attach to every item. Removed before
 #: hashing, or two copies of one story differ only by their footer.
@@ -93,18 +95,44 @@ def clean_text(value: str) -> str:
 
 
 def tokenise(text: str) -> list[str]:
-    """Lowercase word tokens with stopwords removed."""
-    return [t for t in _TOKEN.findall(text.lower()) if t not in _STOPWORDS and len(t) > 1]
+    """Lowercase word tokens with stopwords removed.
+
+    Single characters are dropped, with one exception: **digits are always
+    kept**. A lone letter is almost never information, but a lone digit
+    routinely is the whole story -- "Hurricane reaches Category 3" and "Category
+    5" are different events, and dropping the digit made them the same text.
+    """
+    return [
+        t
+        for t in _TOKEN.findall(text.lower())
+        if t not in _STOPWORDS and (len(t) > 1 or t.isdigit())
+    ]
+
+
+#: Protects a decimal separator sitting between two digits, so "4.25" survives
+#: as one token when the surrounding punctuation is stripped.
+_DECIMAL = re.compile(r"(?<=\d)[.,](?=\d)")
+_NON_CONTENT = re.compile(r"[^\w\u2024]+")
 
 
 def content_hash(title: str, body: str) -> str:
-    """Stable SHA-256 over the normalised text.
+    """Stable SHA-256 identity for one article.
 
-    Hashes the *token sequence* rather than the raw string, so a difference in
-    punctuation or capitalisation does not defeat exact-match deduplication.
+    Normalises case and punctuation so that formatting differences do not defeat
+    exact-match deduplication -- and keeps **everything else**, including every
+    number.
+
+    It deliberately does not hash the output of :func:`tokenise`. That stream
+    has stopwords removed and short tokens dropped, which is right for measuring
+    similarity and wrong for establishing identity: it made "CPI rose 3.1%" and
+    "CPI rose 2.4%" hash identically, so the second story was silently discarded
+    as a duplicate of the first. For a trading system the number is frequently
+    the only part that matters.
     """
-    tokens = tokenise(f"{title} {body}")
-    return hashlib.sha256(" ".join(tokens).encode("utf-8")).hexdigest()
+    text = f"{title} {body}".lower()
+    text = _DECIMAL.sub("\u2024", text)
+    text = _NON_CONTENT.sub(" ", text)
+    return hashlib.sha256(" ".join(text.split()).encode("utf-8")).hexdigest()
 
 
 def simhash(text: str, *, bits: int = 64) -> int:

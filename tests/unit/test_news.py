@@ -508,3 +508,76 @@ class TestFuturePublicationTimes:
                         published_ms=5_000_000 + 59 * 60_000, source="src_b")
         assert honest.age_ms(6_000_000) == lying.age_ms(6_000_000)
         assert freshness(honest, 6_000_000) == freshness(lying, 6_000_000)
+
+
+class TestNumbersAreContent:
+    """A headline's number is often the entire story.
+
+    The defect: `content_hash` hashed the output of `tokenise`, which drops
+    stopwords and any token shorter than two characters. Single digits vanished
+    and decimals were split, so "Hurricane reaches Category 3" and "Category 5"
+    produced identical hashes and the second was silently discarded as a
+    duplicate of the first. Found by noticing that 6,000 articles with distinct
+    titles were collapsing into a handful.
+    """
+
+    @pytest.mark.parametrize(
+        ("first", "second"),
+        [
+            ("Fed cuts rates to 4.25%", "Fed cuts rates to 4.50%"),
+            ("CPI rose 3.1% in July", "CPI rose 2.4% in July"),
+            ("Hurricane reaches Category 3", "Hurricane reaches Category 5"),
+            ("Trump leads by 5 points", "Trump leads by 12 points"),
+            ("Payrolls up 150000", "Payrolls up 90000"),
+            ("Decision number 1", "Decision number 2"),
+        ],
+    )
+    def test_a_different_number_is_a_different_story(self, first, second):
+        assert content_hash(first, "") != content_hash(second, "")
+
+    @pytest.mark.parametrize(
+        ("first", "second"),
+        [
+            ("Fed Holds Rates!", "fed holds rates"),
+            ("A  b   c", "a b c"),
+            ("x, y; z", "x y z"),
+            ("Rates steady -- again", "rates steady again"),
+        ],
+    )
+    def test_formatting_alone_is_still_the_same_story(self, first, second):
+        """The behaviour the token-based hash was reaching for, kept."""
+        assert content_hash(first, "") == content_hash(second, "")
+
+    def test_a_decimal_survives_tokenisation_whole(self):
+        """Splitting 4.25 into 4 and 25 loses the number entirely."""
+        assert "4.25" in tokenise("Fed cuts to 4.25% today")
+
+    def test_lone_digits_survive_but_lone_letters_do_not(self):
+        tokens = tokenise("Category 3 storm x y z")
+        assert "3" in tokens
+        assert "x" not in tokens and "y" not in tokens
+
+    def test_numerically_different_headlines_are_not_near_duplicates(self):
+        """Exact hashing is not enough: simhash must separate them too.
+
+        With digits dropped, these two tokenised identically -- so even with
+        different content hashes the near-duplicate check would have merged them.
+        """
+        pairs = [
+            ("Hurricane reaches Category 3", "Hurricane reaches Category 5"),
+            ("CPI rose 3.1% in July", "CPI rose 2.4% in July"),
+        ]
+        for a, b in pairs:
+            assert simhash_distance(simhash(a), simhash(b)) > 3, (a, b)
+
+    def test_the_deduplicator_keeps_both(self):
+        """End to end: the story that used to disappear."""
+        d = Deduplicator()
+        kept = d.process(
+            [
+                article("Hurricane reaches Category 3", "The storm intensified overnight."),
+                article("Hurricane reaches Category 5", "The storm intensified overnight.",
+                        source="src_b"),
+            ]
+        )
+        assert len(kept) == 2, "a stronger hurricane is not a reprint of a weaker one"
