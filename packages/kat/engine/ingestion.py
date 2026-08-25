@@ -81,6 +81,7 @@ class MarketDataIngestor:
         self._last_quote: dict[str, tuple] = {}
         self.quotes_persisted = 0
         self.quotes_unchanged = 0
+        self.definitions_attached = 0
         self.snapshots_applied = 0
         self._register_handlers()
 
@@ -100,6 +101,36 @@ class MarketDataIngestor:
 
     async def stop(self) -> None:
         await self.ws.stop()
+
+    def set_definitions(self, definitions: dict[str, dict[str, Any]]) -> None:
+        """Attach each market's own text to its snapshot.
+
+        A market's title, resolution rules and close time are *definitions*: the
+        websocket never sends them, so without this step every snapshot carries
+        an empty metadata dict. That is not a cosmetic gap -- the news matcher
+        scores an article against a market's title and rules, so with both blank
+        it can never match anything, and the whole news subsystem produced zero
+        signals in every engine run while working perfectly in isolation.
+
+        The term features need ``close_ts_ms`` for the same reason.
+        """
+        attached = 0
+        for ticker, definition in definitions.items():
+            snapshot = self.state.get(ticker)
+            if snapshot is None:
+                snapshot = self.state.ensure(
+                    ticker, event_ticker=str(definition.get("event_ticker", ""))
+                )
+            snapshot.metadata.update(definition)
+            attached += 1
+        self.definitions_attached = attached
+        log.info(
+            "ingestion.definitions_attached",
+            domain=self.market_type.value,
+            markets=attached,
+            with_title=sum(1 for d in definitions.values() if d.get("title")),
+            with_rules=sum(1 for d in definitions.values() if d.get("rules_primary")),
+        )
 
     async def set_watchlist(self, tickers: list[str]) -> None:
         """Subscribe to ``tickers``, updating incrementally where possible."""
@@ -336,6 +367,7 @@ class MarketDataIngestor:
             "watchlist": len(self.watchlist),
             "snapshots_applied": self.snapshots_applied,
             "dropped_deltas": self.dropped_deltas,
+            "definitions_attached": self.definitions_attached,
             "quotes_persisted": self.quotes_persisted,
             "quotes_unchanged": self.quotes_unchanged,
             "websocket": self.ws.stats(),
@@ -356,6 +388,17 @@ def _levels(raw: Any) -> list[tuple[int, int]]:
     return out
 
 
+#: Definitions for the markets the last selection chose, keyed by ticker.
+#: Populated by :func:`select_event_watchlist` and read by the caller, which
+#: hands them to :meth:`MarketDataIngestor.set_definitions`.
+_LAST_DEFINITIONS: dict[str, dict[str, Any]] = {}
+
+
+def last_event_definitions() -> dict[str, dict[str, Any]]:
+    """Market text from the most recent watchlist selection."""
+    return dict(_LAST_DEFINITIONS)
+
+
 async def select_event_watchlist(
     rest: EventContractsREST, *, limit: int = DEFAULT_WATCHLIST_SIZE
 ) -> list[str]:
@@ -374,7 +417,21 @@ async def select_event_watchlist(
     # in them. See EventMarket.has_live_quote.
     tradeable = [m for m in active if m.has_live_quote]
     tradeable.sort(key=lambda m: m.volume_24h_qc or 0, reverse=True)
-    chosen = [m.ticker for m in tradeable[:limit]]
+    picked = tradeable[:limit]
+    chosen = [m.ticker for m in picked]
+    # Kept rather than discarded: these objects already carry the title, rules
+    # and close time that the news matcher and the term features need, and
+    # nothing else in the system ever fetches them.
+    _LAST_DEFINITIONS.clear()
+    _LAST_DEFINITIONS.update({
+        m.ticker: {
+            "title": m.title or "",
+            "rules_primary": m.rules_primary or "",
+            "event_ticker": m.event_ticker or "",
+            "close_ts_ms": int(m.close_time.timestamp() * 1000) if m.close_time else None,
+        }
+        for m in picked
+    })
     log.info(
         "ingestion.watchlist_selected",
         domain="event",

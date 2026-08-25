@@ -38,6 +38,7 @@ from kat.engine.decision import DecisionRecorder
 from kat.engine.features import FeatureWorker
 from kat.engine.ingestion import (
     MarketDataIngestor,
+    last_event_definitions,
     select_event_watchlist,
     select_perp_watchlist,
 )
@@ -389,6 +390,10 @@ class Platform:
             if self.event_rest is not None:
                 watchlist = await select_event_watchlist(self.event_rest)
                 await event_ingestor.set_watchlist(watchlist)
+                # The selector already fetched each market's title, rules and
+                # close time; attach them so the news matcher and the term
+                # features have something to read.
+                event_ingestor.set_definitions(last_event_definitions())
 
         self.app.register(
             ServiceComponent(
