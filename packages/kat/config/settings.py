@@ -119,8 +119,20 @@ class KalshiSettings(BaseSettings):
     # Client tuning. These affect latency and reliability, never safety.
     request_timeout_s: float = Field(default=8.0, ge=0.5, le=60.0)
     connect_timeout_s: float = Field(default=4.0, ge=0.5, le=30.0)
-    ws_ping_interval_s: float = Field(default=10.0, ge=1.0, le=60.0)
-    ws_ping_timeout_s: float = Field(default=10.0, ge=1.0, le=60.0)
+    #: Keepalive. Deliberately tolerant.
+    #:
+    #: At 10s/10s the client was closing its own healthy connections: 221 of the
+    #: 408 disconnects observed in a day were `keepalive ping timeout`, and each
+    #: one triggered a reconnect, a resubscribe, and a "Subscription buffer
+    #: overflow" as the snapshot burst arrived. Market coverage fell from 57
+    #: markets to 6 with nothing reporting a fault.
+    #:
+    #: A pong is only evidence the far end is alive; missing one briefly is not
+    #: evidence it is dead. The rest of those disconnects were the exchange
+    #: itself (124 HTTP 503s and 57 handshake timeouts on the demo gateway), so
+    #: the connection needs to tolerate a bad minute rather than react to it.
+    ws_ping_interval_s: float = Field(default=20.0, ge=1.0, le=120.0)
+    ws_ping_timeout_s: float = Field(default=45.0, ge=1.0, le=180.0)
     ws_max_reconnect_delay_s: float = Field(default=30.0, ge=1.0, le=300.0)
 
     # Token-bucket budgets. Defaults are the documented Basic tier; the platform

@@ -95,8 +95,8 @@ class KalshiWebSocket:
         url: str,
         signer: KalshiSigner | None,
         domain: str,
-        ping_interval_s: float = 10.0,
-        ping_timeout_s: float = 10.0,
+        ping_interval_s: float = 20.0,
+        ping_timeout_s: float = 45.0,
         max_reconnect_delay_s: float = 30.0,
         message_queue_size: int = 10_000,
     ) -> None:
@@ -105,6 +105,9 @@ class KalshiWebSocket:
         self.domain = domain  # "event" | "perp", used for metric labels
         self.ping_interval_s = ping_interval_s
         self.ping_timeout_s = ping_timeout_s
+        #: How long a subscribed connection may deliver nothing at all before it
+        #: is treated as dead. Replaces the pong deadline as the liveness test.
+        self.silence_timeout_s = max(ping_timeout_s, ping_interval_s * 3)
         self.max_reconnect_delay_s = max_reconnect_delay_s
 
         self.state = WSState.DISCONNECTED
@@ -262,8 +265,20 @@ class KalshiWebSocket:
         async with websockets.connect(
             self.url,
             additional_headers=headers,
+            # Pings are sent, but a missing pong does not close the connection.
+            #
+            # Letting the library enforce a pong deadline meant closing links
+            # that were actively delivering market data: 221 of 408 observed
+            # disconnects were `keepalive ping timeout`, and each one cost a
+            # reconnect, a resubscribe and a subscription buffer overflow.
+            # Raising the deadline to 45s did not stop it, because the demo
+            # gateway simply does not always answer -- while still streaming
+            # thousands of book updates.
+            #
+            # A connection carrying data is alive, whatever it says about pings.
+            # Liveness is judged by `_watch_liveness` on that basis instead.
             ping_interval=self.ping_interval_s,
-            ping_timeout=self.ping_timeout_s,
+            ping_timeout=None,
             close_timeout=5.0,
             max_size=8 * 1024 * 1024,
         ) as ws:
@@ -281,8 +296,41 @@ class KalshiWebSocket:
                     await self._send_subscribe(sub)
                 self.state = WSState.CONNECTED
 
-            async for raw in ws:
-                await self._handle_raw(raw)
+            self.last_message_ms = int(asyncio.get_running_loop().time() * 1000)
+            watchdog = asyncio.create_task(self._watch_liveness(ws))
+            try:
+                async for raw in ws:
+                    await self._handle_raw(raw)
+            finally:
+                watchdog.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await watchdog
+
+    async def _watch_liveness(self, ws: Any) -> None:
+        """Close the connection when it stops carrying data, not when a pong is late.
+
+        The exchange sends book updates continuously on a subscribed feed, so
+        silence is the meaningful failure signal. A pong is only evidence about
+        the pong machinery, and on the demo gateway that machinery is
+        unreliable in a way the data stream is not.
+
+        The threshold is generous: a genuinely dead link is detected within it,
+        and a quiet minute on a thin market is not mistaken for one.
+        """
+        while True:
+            await asyncio.sleep(self.ping_interval_s)
+            now = int(asyncio.get_running_loop().time() * 1000)
+            silent_ms = now - self.last_message_ms
+            if silent_ms > self.silence_timeout_s * 1000:
+                log.warning(
+                    "ws.silent_too_long",
+                    domain=self.domain,
+                    silent_s=round(silent_ms / 1000, 1),
+                    threshold_s=self.silence_timeout_s,
+                    note="no message of any kind; treating the connection as dead",
+                )
+                await ws.close(code=1011, reason="no data")
+                return
 
     # -- messaging -----------------------------------------------------------
 
