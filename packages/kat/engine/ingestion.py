@@ -76,6 +76,11 @@ class MarketDataIngestor:
         self.watchlist: list[str] = []
         self._subscription: Any = None
         self.dropped_deltas = 0
+        #: Last persisted top-of-book per ticker, so an unchanged quote is not
+        #: written again.
+        self._last_quote: dict[str, tuple] = {}
+        self.quotes_persisted = 0
+        self.quotes_unchanged = 0
         self.snapshots_applied = 0
         self._register_handlers()
 
@@ -119,6 +124,7 @@ class MarketDataIngestor:
             await self.ws.update_subscription(self._subscription, add=added, remove=removed)
             for ticker in removed:
                 self.state.drop(ticker)
+                self._last_quote.pop(ticker, None)
             self.watchlist = new
             log.info(
                 "ingestion.watchlist_updated",
@@ -275,12 +281,37 @@ class MarketDataIngestor:
     # -- persistence ---------------------------------------------------------
 
     def _persist_quote(self, ticker: str, now_ms: int) -> None:
+        """Store a quote row when the quote actually changed.
+
+        A ``Quote`` row records the top of book. Most order-book deltas do not
+        touch it -- a size change seven levels deep moves nothing we store -- so
+        writing one per delta produced a stream of byte-identical rows: roughly
+        110 a second against 57 demo markets, which is about 9.5 million rows a
+        day recording almost nothing, plus the event-loop and database work to
+        put them there while the websocket was falling behind.
+
+        Deduplicating on the stored fields keeps the series exactly as
+        informative and costs a tuple comparison.
+        """
         if not self.persist_quotes or self.writer is None:
             return
         snap = self.state.get(ticker)
         if snap is None or snap.book is None:
             return
         book = snap.book
+
+        fingerprint = (
+            book.best_bid_cc, book.best_ask_cc,
+            book.best_bid_size_qc, book.best_ask_size_qc,
+            snap.last_trade_cc, snap.mark_price_cc,
+            snap.volume_qc, snap.open_interest_qc,
+        )
+        if self._last_quote.get(ticker) == fingerprint:
+            self.quotes_unchanged += 1
+            return
+        self._last_quote[ticker] = fingerprint
+        self.quotes_persisted += 1
+
         self.writer.enqueue(
             Quote(
                 ticker=ticker,
@@ -305,6 +336,8 @@ class MarketDataIngestor:
             "watchlist": len(self.watchlist),
             "snapshots_applied": self.snapshots_applied,
             "dropped_deltas": self.dropped_deltas,
+            "quotes_persisted": self.quotes_persisted,
+            "quotes_unchanged": self.quotes_unchanged,
             "websocket": self.ws.stats(),
             "messages": metrics.get_counter(M_WS_MESSAGES, domain=self.market_type.value),
         }

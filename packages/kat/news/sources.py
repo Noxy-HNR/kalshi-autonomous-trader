@@ -35,6 +35,7 @@ and a client that re-downloads an unchanged 200 KB feed all day gets blocked.
 
 from __future__ import annotations
 
+import asyncio
 import calendar
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -202,7 +203,13 @@ class NewsSource(ABC):
             return []
         response.raise_for_status()
         self.remember_validators(response)
-        return self.parse(response)
+        # Parsing runs in a worker thread. It is pure CPU over a payload that
+        # can reach a quarter of a megabyte, and this coroutine shares its event
+        # loop with the market-data websocket: measured against the live feeds,
+        # doing it inline stalled the loop for 305ms in a single call, which is
+        # long enough for the exchange to conclude we have stopped listening.
+        # `parse` is pure and touches no shared state, so a thread is safe.
+        return await asyncio.to_thread(self.parse, response)
 
     @abstractmethod
     def parse(self, response: httpx.Response) -> list[RawItem]:
@@ -214,8 +221,11 @@ class RSSSource(NewsSource):
 
     feedparser is handed *bytes we already fetched* rather than a URL. Its own
     fetcher is synchronous ``urllib`` with no timeout control, which would stall
-    the whole ingestion loop on one slow publisher; parsing bytes is pure CPU
-    and safe to call from the event loop for feeds of this size.
+    the whole ingestion loop on one slow publisher.
+
+    Parsing those bytes is pure CPU, and it is not cheap: a 230KB feed takes
+    long enough that :meth:`NewsSource.fetch` runs it in a worker thread rather
+    than on the event loop.
     """
 
     __slots__ = ()

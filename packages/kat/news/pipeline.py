@@ -47,6 +47,15 @@ log = get_logger(__name__)
 
 __all__ = ["NewsPipeline", "PipelineResult"]
 
+#: Sources fetched at once.
+#:
+#: Low deliberately. The cost being spread is the TLS handshake, which is CPU
+#: on the event loop this shares with the market-data websocket, and news is
+#: never urgent -- a poll taking two seconds longer costs nothing, while a
+#: third-of-a-second stall in market data is noticed by the exchange.
+_FETCH_CONCURRENCY = 4
+
+
 
 @dataclass(slots=True)
 class PipelineResult:
@@ -195,9 +204,19 @@ class NewsPipeline:
             return result
 
         client = self._http()
-        # Concurrent, and every failure isolated to its own source.
+        # Concurrent, but not all at once, and every failure isolated to its own
+        # source. Opening twenty TLS connections simultaneously bunches the
+        # handshake CPU into one burst: measured, that stalled the event loop --
+        # shared with the market-data websocket -- for 309ms, against 67ms once
+        # the connections were pooled. A small limit spreads the same work out.
+        gate = asyncio.Semaphore(_FETCH_CONCURRENCY)
+
+        async def guarded(source: NewsSource) -> list:
+            async with gate:
+                return await self._fetch(source, result)
+
         fetched = await asyncio.gather(
-            *(self._fetch(source, result) for source in self.sources),
+            *(guarded(source) for source in self.sources),
             return_exceptions=True,
         )
 
@@ -216,84 +235,33 @@ class NewsPipeline:
                 cap=self.settings.max_articles_per_poll,
             )
 
-        articles: list[Article] = []
-        for item in raw_items:
-            try:
-                article = normalise(item, self.clock)
-            except Exception as exc:  # one bad item, not the batch
-                result.item_failures += 1
-                log.warning("news.normalise_failed", source=item.source_id, error=str(exc))
-                continue
-            if article is not None:
-                articles.append(article)
-        result.normalised = len(articles)
-
-        # One line per affected source per cycle, rather than one per article.
-        # A source whose clock or timezone is wrong is worth knowing about once;
-        # it is not worth thirty warnings every five minutes forever.
-        future_dated: dict[str, int] = {}
-        for article in articles:
-            if (
-                article.quality is DataQuality.SUSPECT
-                and article.published_ms
-                and article.published_ms > article.ingested_ms
-            ):
-                future_dated[article.source] = future_dated.get(article.source, 0) + 1
-        for source, count in future_dated.items():
-            worst = max(
-                a.published_ms - a.ingested_ms
-                for a in articles
-                if a.source == source and a.published_ms and a.published_ms > a.ingested_ms
-            )
-            log.warning(
-                "news.source_clock_ahead",
-                source=source,
-                articles=count,
-                worst_ahead_ms=worst,
-                note=(
-                    "the source timestamps items after we received them, which is "
-                    "impossible; they are kept and flagged, and nothing downstream "
-                    "reads published time for decisions"
-                ),
-            )
-        result.future_dated = sum(future_dated.values())
-
-        unique = self.deduplicator.process(articles)
-        result.unique = len(unique)
-
-        enriched: list[Article] = []
-        for article in unique:
-            try:
-                enriched.append(self.extractor.enrich(article))
-            except Exception as exc:
-                result.item_failures += 1
-                log.warning(
-                    "news.extract_failed", article_id=article.article_id, error=str(exc)
-                )
-                enriched.append(article)
+        # Everything from here to the matcher is pure CPU over text: measured
+        # against the live feeds it is about two seconds of unbroken regex work
+        # for six hundred articles. This coroutine shares its event loop with
+        # the market-data websocket, so doing it inline stalled the socket for
+        # a third of a second at a time and the exchange began dropping our
+        # subscriptions. It runs in a worker thread instead.
+        #
+        # The thread does the computing; the loop does the mutating. Everything
+        # the thread touches is either local to the batch or owned solely by
+        # this coroutine, and the results are applied to the shared deques and
+        # the write queue back here, where nothing else is running.
+        articles, enriched, matched = await asyncio.to_thread(
+            self._process_batch, raw_items, result
+        )
+        self._report_clock_skew(articles, result)
 
         now_ms = self.clock.now_ms()
-        for article in enriched:
-            try:
-                matches = self.matcher.match(article)
-            except Exception as exc:
-                result.item_failures += 1
-                log.warning("news.match_failed", article_id=article.article_id, error=str(exc))
-                matches = []
-
-            top = max((m.relevance for m in matches), default=None)
-            stored = article.evolve(relevance=top)
-            self._articles.append(stored)
-
+        for article, matches in matched:
+            self._articles.append(article)
             if self.writer is not None:
-                self.writer.enqueue(stored.to_orm())
-
+                self.writer.enqueue(article.to_orm())
             if matches:
                 result.matched += 1
             for match in matches:
-                signal = self._build_signal(stored, match, now_ms)
-                if signal is not None:
+                if self._build_signal(article, match, now_ms) is not None:
                     result.signals += 1
+        del enriched
 
         result.duration_ms = (time.monotonic() - started) * 1000
         self.last_result = result
@@ -346,6 +314,87 @@ class NewsPipeline:
             )
         )
         return estimate
+
+    def _process_batch(
+        self, raw_items: list, result: PipelineResult
+    ) -> tuple[list[Article], list[Article], list[tuple[Article, list[MarketMatch]]]]:
+        """Normalise, deduplicate, extract and match. Runs off the event loop.
+
+        Pure with respect to everything outside the pipeline's own text state:
+        it mutates the deduplication window, the extractor's background corpus
+        and the per-run counters, none of which any other coroutine writes to.
+        It deliberately does **not** touch the article or signal deques or the
+        database queue -- those are applied by the caller on the loop.
+        """
+        articles: list[Article] = []
+        for item in raw_items:
+            try:
+                article = normalise(item, self.clock)
+            except Exception as exc:  # one bad item, not the batch
+                result.item_failures += 1
+                log.warning("news.normalise_failed", source=item.source_id, error=str(exc))
+                continue
+            if article is not None:
+                articles.append(article)
+        result.normalised = len(articles)
+
+        unique = self.deduplicator.process(articles)
+        result.unique = len(unique)
+
+        enriched: list[Article] = []
+        for article in unique:
+            try:
+                enriched.append(self.extractor.enrich(article))
+            except Exception as exc:
+                result.item_failures += 1
+                log.warning(
+                    "news.extract_failed", article_id=article.article_id, error=str(exc)
+                )
+                enriched.append(article)
+
+        matched: list[tuple[Article, list[MarketMatch]]] = []
+        for article in enriched:
+            try:
+                matches = self.matcher.match(article)
+            except Exception as exc:
+                result.item_failures += 1
+                log.warning("news.match_failed", article_id=article.article_id, error=str(exc))
+                matches = []
+            top = max((m.relevance for m in matches), default=None)
+            matched.append((article.evolve(relevance=top), matches))
+
+        return articles, enriched, matched
+
+    def _report_clock_skew(self, articles: list[Article], result: PipelineResult) -> None:
+        """One line per affected source per cycle, not one per article.
+
+        A source whose clock or timezone is wrong is worth knowing about once.
+        Logged per article it produced 1,390 of 1,527 warnings in a day and
+        buried everything else.
+        """
+        ahead: dict[str, list[int]] = {}
+        for article in articles:
+            if (
+                article.quality is DataQuality.SUSPECT
+                and article.published_ms
+                and article.published_ms > article.ingested_ms
+            ):
+                ahead.setdefault(article.source, []).append(
+                    article.published_ms - article.ingested_ms
+                )
+        for source, offsets in ahead.items():
+            log.warning(
+                "news.source_clock_ahead",
+                source=source,
+                articles=len(offsets),
+                worst_ahead_ms=max(offsets),
+                note=(
+                    "the source timestamps items after we received them, which is "
+                    "impossible; they are kept and flagged, and nothing downstream "
+                    "reads published time for decisions"
+                ),
+            )
+        result.future_dated = sum(len(v) for v in ahead.values())
 
     # -- consumption ---------------------------------------------------------
 
