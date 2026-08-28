@@ -8,6 +8,7 @@ const SECTIONS: Array<{ group: string; items: Array<[string, string]> }> = [
     group: "Monitor",
     items: [
       ["/", "Overview"],
+      ["/portfolio", "Portfolio"],
       ["/events", "Event Contracts"],
       ["/perps", "Perpetuals"],
       ["/positions", "Positions"],

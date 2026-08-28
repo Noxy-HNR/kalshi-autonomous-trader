@@ -34,6 +34,18 @@ export const PAGE: Record<string, ReactNode> = {
     </>
   ),
 
+  portfolio: (
+    <>
+      <strong>A visual read on the same numbers as Overview.</strong> Equity is what the
+      account is worth; exposure is how much of it is committed to open trades right now.
+      <br />
+      <br />
+      The equity-over-time chart is recorded locally in your browser from live polls, not
+      pulled from a server-side history the engine doesn&rsquo;t keep &mdash; it starts over
+      on a new device and grows the longer this page stays open.
+    </>
+  ),
+
   events: (
     <>
       <strong>Event contracts are yes-or-no bets on real events.</strong> &ldquo;Will the

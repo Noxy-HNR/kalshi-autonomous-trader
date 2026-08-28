@@ -179,6 +179,38 @@ input[type="range"]::-moz-range-thumb { width: 15px; height: 15px;
 /* Flip below when the marker sits near the top of the viewport. */
 h1 .help-bubble { bottom: auto; top: calc(100% + 8px); }
 
+/* --- charts -----------------------------------------------------------
+   Pure inline SVG, no charting dependency. A "cool looking graph" here is
+   still real data pulled from the same polls that feed the tables — never a
+   demo trendline, and an honest empty state while there isn't enough data
+   yet to draw a line. */
+.chart-svg { width: 100%; display: block; }
+.chart-empty { display: flex; align-items: center; justify-content: center;
+  color: var(--muted); font-size: 12px; border: 1px dashed var(--border);
+  border-radius: 6px; text-align: center; padding: 10px; }
+.chart-range { margin-top: 6px; }
+.good { color: var(--good); }
+.bad { color: var(--bad); }
+
+.donut-wrap { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.donut-value { font-family: var(--mono); font-size: 15px; font-weight: 700; }
+.donut-label { font-size: 9px; text-transform: uppercase; letter-spacing: .5px; }
+.donut-legend { display: flex; flex-direction: column; gap: 6px; min-width: 130px; }
+.swatch { width: 9px; height: 9px; border-radius: 2px; flex: none; }
+
+.hbar-chart { display: flex; flex-direction: column; gap: 8px; }
+.hbar-row { display: grid; grid-template-columns: minmax(70px, 120px) 1fr auto;
+  align-items: center; gap: 8px; }
+.hbar-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hbar-track { height: 8px; background: #0d1119; border-radius: 4px; overflow: hidden;
+  border: 1px solid var(--border); }
+.hbar-fill { height: 100%; border-radius: 3px; }
+.hbar-fill.good { background: var(--good); }
+.hbar-fill.bad { background: var(--bad); }
+.hbar-fill.warn { background: var(--warn); }
+.hbar-fill.accent { background: var(--accent); }
+.hbar-value { text-align: right; white-space: nowrap; }
+
 /* --- slider default marker ------------------------------------------------
    The shipped default is marked at its real position on the track. It used to
    be a word centred under the slider, which implied the default sat mid-range;
