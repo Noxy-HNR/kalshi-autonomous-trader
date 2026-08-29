@@ -113,6 +113,14 @@ class MarketDataIngestor:
         signals in every engine run while working perfectly in isolation.
 
         The term features need ``close_ts_ms`` for the same reason.
+
+        Status is the same problem in a smaller costume. It is only ever set by a
+        ``market_lifecycle`` message, which the exchange sends when a status
+        *changes* -- so a market that was already open when we subscribed never
+        sends one and its status stayed empty for the life of the process. The
+        definition already carries it, so it is filled in here and left alone
+        afterwards: a live lifecycle message is newer than this snapshot of the
+        listing and must win.
         """
         attached = 0
         for ticker, definition in definitions.items():
@@ -122,6 +130,9 @@ class MarketDataIngestor:
                     ticker, event_ticker=str(definition.get("event_ticker", ""))
                 )
             snapshot.metadata.update(definition)
+            status = definition.get("status")
+            if status and snapshot.status is None:
+                snapshot.status = str(status)
             attached += 1
         self.definitions_attached = attached
         log.info(
@@ -394,6 +405,20 @@ def _levels(raw: Any) -> list[tuple[int, int]]:
 _LAST_DEFINITIONS: dict[str, dict[str, Any]] = {}
 
 
+#: How wide a market may be quoted and still be worth a subscription slot.
+#: Deliberately looser than any strategy's own limit: this decides what is worth
+#: watching, not what is worth trading, and a market that drifts in and out of
+#: tradeable is exactly one to keep an eye on.
+_WATCH_MAX_SPREAD_CC = 1_000
+
+
+def _spread_cc(market: Any) -> int | None:
+    bid, ask = market.yes_bid_cc, market.yes_ask_cc
+    if bid is None or ask is None:
+        return None
+    return ask - bid
+
+
 def last_event_definitions() -> dict[str, dict[str, Any]]:
     """Market text from the most recent watchlist selection."""
     return dict(_LAST_DEFINITIONS)
@@ -431,8 +456,34 @@ async def select_event_watchlist(
     # every market and spent the subscription budget on markets with no orders
     # in them. See EventMarket.has_live_quote.
     tradeable = [m for m in active if m.has_live_quote]
-    tradeable.sort(key=lambda m: m.volume_24h_qc or 0, reverse=True)
-    picked = tradeable[:limit]
+
+    # Volume alone picks markets that already traded, not markets that trade.
+    #
+    # Ranking on 24-hour volume filled the watchlist with 2028 nomination
+    # longshots: enormous cumulative volume, a one-cent book on one side only,
+    # and no update for twenty-five minutes. Twenty-nine of sixty were stale at
+    # any moment and eight had a two-sided book, so the features had almost
+    # nothing to compute on and the strategies had almost nothing to consider.
+    #
+    # A market has to be *quotable* before its volume means anything, so the
+    # spread is a filter rather than a tiebreak. The bound is deliberately
+    # looser than any strategy's own limit -- this decides what is worth
+    # watching, and a market drifting in and out of tradeable is worth watching
+    # -- but it excludes the ones no strategy could ever act on.
+    quotable = [m for m in tradeable if _spread_cc(m) is not None and _spread_cc(m) <= _WATCH_MAX_SPREAD_CC]
+    if not quotable:
+        # Never widen silently: an empty watchlist is a fact worth logging, and
+        # falling back to the unfiltered list would hide the exchange being shut.
+        log.warning(
+            "ingestion.no_quotable_markets",
+            domain="event",
+            quoted=len(tradeable),
+            max_spread_cc=_WATCH_MAX_SPREAD_CC,
+            note="watching the widest-quoted markets instead; nothing may be tradeable",
+        )
+        quotable = tradeable
+    quotable.sort(key=lambda m: (m.volume_24h_qc or 0, -(_spread_cc(m) or 10_000)), reverse=True)
+    picked = quotable[:limit]
     chosen = [m.ticker for m in picked]
     # Kept rather than discarded: these objects already carry the title, rules
     # and close time that the news matcher and the term features need, and
@@ -444,6 +495,7 @@ async def select_event_watchlist(
             "rules_primary": m.rules_primary or "",
             "event_ticker": m.event_ticker or "",
             "close_ts_ms": int(m.close_time.timestamp() * 1000) if m.close_time else None,
+            "status": m.status or "",
         }
         for m in picked
     })
