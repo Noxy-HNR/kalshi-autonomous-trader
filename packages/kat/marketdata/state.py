@@ -148,12 +148,25 @@ class MarketState:
     nothing.
     """
 
-    def __init__(self, market_type: MarketType, *, max_age_ms: int = 5_000) -> None:
+    def __init__(
+        self,
+        market_type: MarketType,
+        *,
+        max_age_ms: int = 5_000,
+        quiet_max_age_ms: int = 300_000,
+    ) -> None:
         self.market_type = market_type
         self.max_age_ms = max_age_ms
+        #: How old a *quiet* market's book may be while the feed is proven live.
+        #: See :meth:`is_fresh` for why this is a different number.
+        self.quiet_max_age_ms = quiet_max_age_ms
         self._markets: dict[str, MarketSnapshot] = {}
         self.messages_applied = 0
         self.books_resynced = 0
+        #: When this feed last delivered anything, on any ticker. This is the
+        #: evidence that silence on one market means "nothing happened" rather
+        #: than "we are disconnected".
+        self.last_message_ms = 0
 
     # -- access --------------------------------------------------------------
 
@@ -187,17 +200,63 @@ class MarketState:
             return None
         return now_ms - snap.updated_ms
 
+    def feed_age_ms(self, *, now_ms: int) -> int | None:
+        """How long since this feed delivered anything at all, on any ticker.
+
+        None before the first message. This is a property of the *connection*,
+        not of any one market, and it is what distinguishes the two kinds of
+        silence in :meth:`is_fresh`.
+        """
+        if self.last_message_ms == 0:
+            return None
+        return now_ms - self.last_message_ms
+
     def is_fresh(self, ticker: str, *, now_ms: int, max_age_ms: int | None = None) -> bool:
         """Whether this market is fresh enough to trade on.
 
         A market that has never been updated is not fresh. That is not the same
         as "unknown": it is a definite refusal, because the alternative is
         pricing against a book we have never seen.
+
+        Two kinds of silence
+        --------------------
+        This is a delta feed. The exchange sends a message when the book
+        *changes*, so a market that has sent nothing for a minute is usually
+        telling us the book is exactly what we already hold -- not that our copy
+        has decayed. Treating that as stale is what a snapshot-polling feed would
+        require, and it is wrong here: measured against a five-second budget, a
+        thin market that reprices every thirty seconds is never fresh, and the
+        platform declines every market it watches, forever. That is not caution;
+        it is a system that cannot trade.
+
+        The silence that *does* mean danger is silence across the whole feed,
+        because that is indistinguishable from being disconnected. So the test
+        is in two parts:
+
+        * the ticker updated within ``max_age_ms`` -- unambiguously current; or
+        * the **feed** delivered something within ``max_age_ms`` (so we are
+          demonstrably still connected and receiving) and this ticker updated
+          within ``quiet_max_age_ms``.
+
+        The second clause is bounded rather than open-ended because a live feed
+        does not prove *this* subscription is live: a per-ticker subscription can
+        be dropped silently while others keep flowing, and after
+        ``quiet_max_age_ms`` we stop assuming otherwise.
+
+        The failure mode that matters is preserved exactly. If the connection
+        drops, ``feed_age_ms`` grows past the budget and every market in this
+        domain goes stale at once, which is the correct and conservative answer.
         """
         age = self.age_ms(ticker, now_ms=now_ms)
         if age is None:
             return False
-        return age <= (max_age_ms if max_age_ms is not None else self.max_age_ms)
+        budget = max_age_ms if max_age_ms is not None else self.max_age_ms
+        if age <= budget:
+            return True
+        feed_age = self.feed_age_ms(now_ms=now_ms)
+        if feed_age is None or feed_age > budget:
+            return False
+        return age <= self.quiet_max_age_ms
 
     def stale_tickers(self, *, now_ms: int) -> list[str]:
         return [t for t in self._markets if not self.is_fresh(t, now_ms=now_ms)]
@@ -215,6 +274,7 @@ class MarketState:
         snap.book_updated_ms = now_ms
         snap.updated_ms = now_ms
         self.messages_applied += 1
+        self.last_message_ms = now_ms
         metrics.gauge(M_MARKET_DATA_AGE_MS, 0, domain=self.market_type.value)
 
     def apply_book_delta(
@@ -255,6 +315,7 @@ class MarketState:
         snap.book_updated_ms = now_ms
         snap.updated_ms = now_ms
         self.messages_applied += 1
+        self.last_message_ms = now_ms
         return True
 
     def apply_event_book_delta(
@@ -286,6 +347,7 @@ class MarketState:
         snap.trade_updated_ms = now_ms
         snap.updated_ms = now_ms
         self.messages_applied += 1
+        self.last_message_ms = now_ms
 
     def apply_ticker(
         self,
@@ -314,6 +376,7 @@ class MarketState:
             snap.next_funding_ms = next_funding_ms
         snap.updated_ms = now_ms
         self.messages_applied += 1
+        self.last_message_ms = now_ms
 
     def set_status(self, ticker: str, status: str, *, now_ms: int) -> None:
         snap = self.ensure(ticker)
@@ -333,6 +396,10 @@ class MarketState:
             "domain": self.market_type.value,
             "markets": len(self._markets),
             "messages_applied": self.messages_applied,
+            # The feed-level liveness that decides whether a quiet market
+            # counts as current. None before the first message arrives.
+            "feed_age_ms": self.feed_age_ms(now_ms=now_ms),
+            "quiet_max_age_ms": self.quiet_max_age_ms,
             "books_resynced": self.books_resynced,
             "with_book": sum(1 for s in self._markets.values() if s.book is not None),
             "max_age_ms": max(ages) if ages else None,

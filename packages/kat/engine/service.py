@@ -33,13 +33,19 @@ someone deliberately changed it, is paper.
 
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 from pathlib import Path
 
 from kat.config.settings import REPO_ROOT, get_settings
 
-__all__ = ["systemd_unit", "windows_task_command", "write_service_files"]
+__all__ = [
+    "systemd_unit",
+    "windows_task_command",
+    "windows_task_xml",
+    "write_service_files",
+]
 
 TASK_NAME = "KalshiAutonomousTrader"
 
@@ -58,19 +64,103 @@ def _python_executable() -> str:
     return sys.executable
 
 
-def windows_task_command() -> str:
-    """The ``schtasks`` command that registers the platform to start at logon.
+def windows_task_xml(user: str | None = None) -> str:
+    """A Scheduled Task definition that survives the ways Windows kills daemons.
 
-    ``/RL LIMITED`` is deliberate: nothing in the platform needs elevation, and a
-    trading process running as Administrator is a larger blast radius for no
-    benefit.
+    Registered from XML rather than from ``schtasks`` switches because the four
+    settings that matter here cannot be expressed on the command line, and all
+    four of their defaults are wrong for a process that is supposed to run for
+    weeks:
+
+    ``RestartOnFailure``
+        Not expressible via ``schtasks /Create`` switches at all. Without it the
+        task starts the process once at logon and, if that process ever dies,
+        does nothing -- which is how a five-hour run ended with the platform
+        down and nothing bringing it back.
+
+    ``ExecutionTimeLimit``
+        Defaults to three days, after which the task engine stops the process.
+        A trading platform that is killed every 72 hours by its own supervisor
+        is worse than one that is not supervised, because the failure looks like
+        a crash.
+
+    ``StopIfGoingOnBatteries`` / ``DisallowStartIfOnBatteries``
+        Both default to true. On a laptop that means the platform stops when the
+        charger is unplugged and refuses to start on battery.
+
+    ``StopOnIdleEnd``
+        Defaults to true: the task is stopped when the machine stops being idle.
+
+    ``LeastPrivilege`` matches the previous ``/RL LIMITED``: nothing here needs
+    elevation, and a trading process running as Administrator is a larger blast
+    radius for no benefit.
     """
     python = _python_executable()
-    return (
-        f'schtasks /Create /TN "{TASK_NAME}" /SC ONLOGON /RL LIMITED /F '
-        f'/TR "\\"{python}\\" -m kat.engine.entrypoint" '
-        f'/WD "{REPO_ROOT}"'
-    )
+    account = user or _current_user()
+    return f"""<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.3" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Kalshi Autonomous Trader. Restarts on failure; never arms live trading by itself.</Description>
+    <URI>\\{TASK_NAME}</URI>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>{account}</UserId>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>{account}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>false</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>5</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>999</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{python}</Command>
+      <Arguments>-m kat.engine.entrypoint</Arguments>
+      <WorkingDirectory>{REPO_ROOT}</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+"""
+
+
+def windows_task_command(xml_path: Path | None = None) -> str:
+    """The ``schtasks`` command that registers the task from its XML definition."""
+    path = xml_path or (REPO_ROOT / "deploy" / "kat-task.xml")
+    return f'schtasks /Create /TN "{TASK_NAME}" /XML "{path}" /F'
+
+
+def _current_user() -> str:
+    r"""The account the task should run as, in DOMAIN\user form where available."""
+    domain = os.environ.get("USERDOMAIN")
+    user = os.environ.get("USERNAME", "")
+    return f"{domain}\\{user}" if domain and user else user
 
 
 def windows_delete_command() -> str:
@@ -133,6 +223,11 @@ def write_service_files(output_dir: Path | None = None) -> dict[str, Path]:
     unit_path = target / "kat.service"
     unit_path.write_text(systemd_unit(), encoding="utf-8")
 
+    # UTF-16 with a BOM: the task scheduler rejects the XML otherwise, and the
+    # error it gives ("The task XML is malformed") does not mention encoding.
+    task_path = target / "kat-task.xml"
+    task_path.write_text(windows_task_xml(), encoding="utf-16")
+
     readme = target / "README.md"
     settings = get_settings()
     readme.write_text(
@@ -143,12 +238,19 @@ the commands to run when you want the platform to survive a reboot.
 
 The application handles its own start-up, shutdown, reconnection, health checks,
 recovery and graceful termination. Neither entry below supervises it beyond
-restarting the process if it exits.
+restarting the process if it exits -- but both do restart it, which is the part
+that matters after an unattended crash.
 
-## Windows (scheduled task, runs at logon)
+## Windows (scheduled task, runs at logon, restarts on failure)
+
+Registered from `kat-task.xml` rather than from `schtasks` switches, because
+restart-on-failure cannot be expressed as a switch and three of the task
+engine's defaults would otherwise stop a long-running process: it halts tasks
+after three days, stops them when the machine goes on battery, and stops them
+when the machine stops being idle. The XML overrides all four.
 
 ```
-{windows_task_command()}
+{windows_task_command(task_path)}
 ```
 
 To remove it:
@@ -196,7 +298,7 @@ resumes anyway.
 """,
         encoding="utf-8",
     )
-    return {"unit": unit_path, "readme": readme}
+    return {"unit": unit_path, "task": task_path, "readme": readme}
 
 
 def main() -> None:

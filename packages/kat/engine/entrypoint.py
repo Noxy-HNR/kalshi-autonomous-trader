@@ -218,8 +218,16 @@ class Platform:
         writer = self.app.writer
         environment = settings.environment
 
-        event_state = MarketState(MarketType.EVENT, max_age_ms=settings.max_market_data_age_ms)
-        perp_state = MarketState(MarketType.PERP, max_age_ms=settings.max_market_data_age_ms)
+        event_state = MarketState(
+            MarketType.EVENT,
+            max_age_ms=settings.max_market_data_age_ms,
+            quiet_max_age_ms=settings.quiet_market_max_age_ms,
+        )
+        perp_state = MarketState(
+            MarketType.PERP,
+            max_age_ms=settings.max_market_data_age_ms,
+            quiet_max_age_ms=settings.quiet_market_max_age_ms,
+        )
         self.context.market_states = {
             MarketType.EVENT: event_state,
             MarketType.PERP: perp_state,

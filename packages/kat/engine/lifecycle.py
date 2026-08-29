@@ -37,6 +37,13 @@ A clean shutdown writes a marker. Its absence at start-up means the previous run
 died unexpectedly, which changes nothing about the sequence above -- reconciliation
 runs identically either way -- but it is recorded, surfaced on the dashboard, and
 raises the bar for automatically re-arming live trading.
+
+The marker also carries a heartbeat, rewritten by the health loop while the
+platform is up. The process can die in ways that run no Python at all -- the
+machine sleeps, the OS terminates it, the power goes -- and none of those reach
+the shutdown path. The heartbeat is what lets the *next* run say how long the
+platform was down, which is the difference between knowing it restarted and
+knowing nobody was watching the positions for five hours.
 """
 
 from __future__ import annotations
@@ -48,6 +55,7 @@ import signal
 import sys
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
@@ -71,6 +79,30 @@ __all__ = ["Application", "ComponentHealth", "Phase", "ServiceComponent"]
 
 #: Key under which the clean-shutdown marker is stored.
 _SHUTDOWN_MARKER = "clean_shutdown"
+
+#: How often the heartbeat is written. Thirty seconds bounds the error in a
+#: reported downtime to thirty seconds, which is far below the resolution anyone
+#: cares about when asking "was the platform up overnight?", while keeping this
+#: to two writes a minute against a row nothing else contends for.
+_HEARTBEAT_INTERVAL_MS = 30_000
+
+
+def _seconds_since(timestamp: str | None) -> float | None:
+    """Seconds between an ISO timestamp and now, or None if it cannot be read.
+
+    Returns None rather than 0 for an unparseable or missing value: zero would
+    read as "no downtime", which is the favourable answer, and an unknown gap is
+    not a proven-absent one.
+    """
+    if not timestamp:
+        return None
+    try:
+        seen = datetime.fromisoformat(timestamp)
+    except ValueError:
+        return None
+    if seen.tzinfo is None:
+        seen = seen.replace(tzinfo=UTC)
+    return max(0.0, (utcnow_aware() - seen).total_seconds())
 
 
 class Phase(str, Enum):
@@ -209,6 +241,13 @@ class StartupReport:
 
     phase: Phase = Phase.CREATED
     clean_previous_shutdown: bool | None = None
+    #: How long the platform was not running, when that can be established.
+    #:
+    #: An unclean shutdown says the process died; this says when, and therefore
+    #: for how long nobody was watching the positions. A five-hour gap and a
+    #: five-second one are the same event without it.
+    downtime_s: float | None = None
+    last_seen_before_restart: str | None = None
     database_ready: bool = False
     kalshi_event_ready: bool = False
     kalshi_perp_ready: bool = False
@@ -222,6 +261,8 @@ class StartupReport:
         return {
             "phase": self.phase.value,
             "clean_previous_shutdown": self.clean_previous_shutdown,
+            "downtime_s": self.downtime_s,
+            "last_seen_before_restart": self.last_seen_before_restart,
             "database_ready": self.database_ready,
             "kalshi_event_ready": self.kalshi_event_ready,
             "kalshi_perp_ready": self.kalshi_perp_ready,
@@ -246,6 +287,9 @@ class Application:
         self.components: list[ServiceComponent] = []
         self.report = StartupReport()
         self._shutdown = asyncio.Event()
+        self._last_heartbeat_ms = 0
+        self._persisted_state_loaded = False
+        self._started_at_iso = utcnow_aware().isoformat()
         self._health_task: asyncio.Task[None] | None = None
         self._started_ms = 0
         # Set only when the full start-up sequence completed successfully.
@@ -433,6 +477,25 @@ class Application:
         self.kill_switches = KillSwitchManager(self.database)
 
     async def _load_persisted_state(self) -> None:
+        """Restore kill switches, mode and the shutdown marker. Runs once.
+
+        Idempotent because it has two callers -- the entrypoint runs it early so
+        the database is up before any component that writes to it starts, and
+        :meth:`start` runs it as part of the fixed sequence. Without the guard it
+        ran twice, and the second pass read the marker the first pass had just
+        cleared: ``clean_previous_shutdown`` was therefore False on every start,
+        including the ones that shut down cleanly.
+
+        That is worse than a duplicated log line. The flag exists to raise the
+        bar for re-arming live trading after a crash, and a flag that is always
+        set carries no information at all.
+        """
+        if self._persisted_state_loaded:
+            return
+        self._persisted_state_loaded = True
+        await self._load_persisted_state_once()
+
+    async def _load_persisted_state_once(self) -> None:
         """Restore kill switches and detect whether the last shutdown was clean."""
         await self.kill_switches.load()
 
@@ -457,11 +520,22 @@ class Application:
                         select(SystemState).where(SystemState.key == _SHUTDOWN_MARKER)
                     )
                 ).scalar_one_or_none()
-                clean = bool(row and (row.value or {}).get("clean"))
+                previous = (row.value or {}) if row is not None else {}
+                clean = bool(previous.get("clean"))
                 self.report.clean_previous_shutdown = clean if row is not None else None
+                # How long was nobody watching? The heartbeat is the last moment
+                # the previous run is known to have been alive; for a clean stop
+                # that is the shutdown itself, and for a kill it is up to one
+                # heartbeat interval before the process died.
+                self.report.last_seen_before_restart = previous.get("last_seen") or previous.get("at")
+                self.report.downtime_s = _seconds_since(self.report.last_seen_before_restart)
                 # Clear the marker: this run is now the one in progress.
                 await session.merge(
-                    SystemState(key=_SHUTDOWN_MARKER, value={"clean": False}, updated_by="startup")
+                    SystemState(
+                        key=_SHUTDOWN_MARKER,
+                        value={"clean": False, "started_at": utcnow_aware().isoformat()},
+                        updated_by="startup",
+                    )
                 )
         except Exception as exc:
             log.warning("app.shutdown_marker_unreadable", error=str(exc))
@@ -470,14 +544,21 @@ class Application:
         if self.report.clean_previous_shutdown is False:
             # Not blocking by itself -- reconciliation runs identically either
             # way -- but it is recorded and raises the bar for re-arming live.
+            downtime = self.report.downtime_s
             log.warning(
                 "app.previous_shutdown_was_unclean",
                 note="reconciliation will determine actual state before trading",
+                last_seen=self.report.last_seen_before_restart,
+                downtime_s=round(downtime) if downtime is not None else None,
             )
             self._audit(
                 "unclean_shutdown_detected",
                 subject="application",
-                detail={"note": "previous run did not shut down cleanly"},
+                detail={
+                    "note": "previous run did not shut down cleanly",
+                    "last_seen": self.report.last_seen_before_restart,
+                    "downtime_s": round(downtime) if downtime is not None else None,
+                },
                 severity="warning",
             )
 
@@ -532,6 +613,40 @@ class Application:
                         sig, lambda s, _f: self.request_shutdown(f"signal {s}")
                     )
 
+    async def _write_heartbeat(self) -> None:
+        """Record that the platform was alive just now.
+
+        The process can die in ways that run no Python at all -- the machine
+        sleeps, the OS terminates it, the power goes. None of those reach the
+        shutdown path, so the only way the *next* run can report how long the
+        platform was down is if this one left a timestamp behind while it was
+        healthy.
+
+        Written from the health loop rather than on its own timer so it inherits
+        that loop's meaning: a heartbeat is only laid down by a run that just
+        passed its health checks and pinged its database.
+        """
+        now = self.clock.now_ms()
+        if now - self._last_heartbeat_ms < _HEARTBEAT_INTERVAL_MS:
+            return
+        self._last_heartbeat_ms = now
+        # Suppressed rather than logged: the database ping above already failed
+        # loudly if the database is unreachable, and a heartbeat that logs its
+        # own failure every thirty seconds would bury that.
+        with contextlib.suppress(Exception):
+            async with self.database.session() as session:
+                await session.merge(
+                    SystemState(
+                        key=_SHUTDOWN_MARKER,
+                        value={
+                            "clean": False,
+                            "started_at": self._started_at_iso,
+                            "last_seen": utcnow_aware().isoformat(),
+                        },
+                        updated_by="heartbeat",
+                    )
+                )
+
     async def _health_loop(self) -> None:
         """Periodically probe components and gate trading on the result."""
         while not self._shutdown.is_set():
@@ -548,6 +663,7 @@ class Application:
 
                 if self.database is not None and self.report.database_ready:
                     await self.database.ping()
+                    await self._write_heartbeat()
 
                 # The same predicate start-up used. Recovery that checked a
                 # narrower set of conditions than the refusal did would undo the

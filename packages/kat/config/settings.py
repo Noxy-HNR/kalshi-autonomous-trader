@@ -431,6 +431,13 @@ class AppSettings(BaseSettings):
     # -- freshness / safety budgets -----------------------------------------
     # An order is never built from market data older than this.
     max_market_data_age_ms: int = Field(default=5_000, ge=100, le=120_000)
+    # How stale a *quiet* market's book may be while the feed itself is proven
+    # live. This is a different question from the budget above: on a delta feed,
+    # a market that has sent nothing is usually saying the book has not changed,
+    # and only silence across the entire feed means we may be disconnected. See
+    # MarketState.is_fresh. Bounded rather than unlimited because a live feed
+    # does not prove one particular subscription is still live.
+    quiet_market_max_age_ms: int = Field(default=300_000, ge=5_000, le=3_600_000)
     # Account state older than this forces a reconciliation before trading.
     max_account_state_age_ms: int = Field(default=30_000, ge=1_000, le=600_000)
     # Startup reconciliation must succeed within this budget or we stay halted.

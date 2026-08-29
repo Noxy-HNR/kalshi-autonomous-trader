@@ -33,7 +33,9 @@ than not trading.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -57,6 +59,11 @@ from kat.risk.types import OrderIntent, RiskVerdict
 from kat.strategies.base import Strategy, StrategyContext
 
 log = get_logger(__name__)
+
+#: How often the loop says what it is doing. Sixty seconds is often
+#: enough that a stalled or silently-declining loop is obvious within a
+#: minute, and rare enough that a quiet overnight run stays readable.
+_SUMMARY_INTERVAL_S = 60.0
 
 __all__ = ["CycleResult", "TradingLoop"]
 
@@ -158,6 +165,7 @@ class TradingLoop:
 
         self.last_cycle: CycleResult | None = None
         self.cycles = 0
+        self._last_summary_s = 0.0
         self._running = False
 
     # -- registration --------------------------------------------------------
@@ -218,6 +226,7 @@ class TradingLoop:
             try:
                 self.last_cycle = await self.run_cycle()
                 self.cycles += 1
+                self._log_periodic_summary()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -229,6 +238,46 @@ class TradingLoop:
             # backlog of cycles all firing at once.
             elapsed = time.monotonic() - started
             await asyncio.sleep(max(0.0, self.interval_s - elapsed))
+
+    def _log_periodic_summary(self) -> None:
+        """Say, periodically, what the loop is doing and why nothing is trading.
+
+        The loop used to log ``trading.loop_started`` once and then nothing,
+        forever. Five hours of that is indistinguishable from a loop that died
+        on its first cycle, and it left the single question an operator actually
+        asks -- "why has it not traded?" -- answerable only by querying an API
+        that has to be running to answer.
+
+        So the answer goes in the log. The skip tallies come from the strategies
+        themselves, which have always counted them; they were simply never
+        reported anywhere a person would look.
+        """
+        now = time.monotonic()
+        if now - self._last_summary_s < _SUMMARY_INTERVAL_S:
+            return
+        self._last_summary_s = now
+
+        cycle = self.last_cycle
+        reasons: Counter[str] = Counter()
+        for strategy in self.strategies:
+            health = getattr(strategy, "health", None)
+            if not callable(health):
+                continue
+            with contextlib.suppress(Exception):
+                reasons.update(health().get("skips") or {})
+
+        log.info(
+            "trading.summary",
+            domain=self.market_type.value,
+            cycles=self.cycles,
+            markets_examined=cycle.markets_examined if cycle else 0,
+            markets_skipped_stale=cycle.markets_skipped_stale if cycle else 0,
+            intents_generated=cycle.intents_generated if cycle else 0,
+            orders_submitted=cycle.orders_submitted if cycle else 0,
+            strategies_active=len(self.active_strategies()),
+            # The whole point of the line: the reasons, most common first.
+            declined_because=dict(reasons.most_common(6)),
+        )
 
     def stop(self) -> None:
         self._running = False
