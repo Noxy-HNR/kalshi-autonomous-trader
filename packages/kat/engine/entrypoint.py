@@ -113,6 +113,31 @@ class Platform:
         """
         kalshi = self.settings.kalshi
 
+        # Reading production without production credentials fails silently, and
+        # silently is the problem. The unauthenticated production API answers
+        # 200 for everything and returns markets with no quotes, no volume and
+        # empty orderbooks -- 12,000 of them. Nothing errors, nothing retries,
+        # and the platform simply watches a universe where nothing is tradeable,
+        # which is indistinguishable from a quiet market.
+        if kalshi.reads_production and not kalshi.prod_credentials.configured:
+            log.error(
+                "kalshi.production_data_without_credentials",
+                note=(
+                    "production market data was requested but no production "
+                    "credentials are set, and Kalshi does not serve quotes "
+                    "unauthenticated -- every market will look unquoted"
+                ),
+                remedy=(
+                    "set KAT_KALSHI__PROD_CREDENTIALS__API_KEY_ID and "
+                    "__PRIVATE_KEY_PATH, or set "
+                    "KAT_KALSHI__READ_PRODUCTION_MARKET_DATA=false"
+                ),
+            )
+            self.app.add_block(
+                "credentials:production",
+                "production market data requested without production credentials",
+            )
+
         event_signer = None
         if kalshi.active_credentials.configured:
             try:
