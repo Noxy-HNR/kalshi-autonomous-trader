@@ -408,8 +408,23 @@ async def select_event_watchlist(
     realisable: a large mispricing in a market that cannot absorb five contracts
     is not an opportunity. Markets already closed or without a live quote are
     excluded outright.
+
+    Enumerated through events, not through ``GET /markets``
+    ------------------------------------------------------
+    Both list the same universe. Only one of them lists it usefully.
+
+    On production, ``/markets`` is dominated by provisional single-market shards
+    that carry no quote: scanning 30,000 of them turned up four quoted markets
+    and not one with any volume, so this selector picked two zero-volume shards
+    and the platform watched them for hours. Nothing failed -- every request
+    answered 200 -- and it was indistinguishable from a quiet exchange.
+
+    ``/events?with_nested_markets=true`` returns 14,433 markets at the same
+    moment on the same key, of which 12,421 are quoted and 1,903 sit inside a
+    three-cent spread. It never showed up on demo, where the market count is
+    small enough that ordering does not matter.
     """
-    markets = await rest.get_markets(status="open", limit=200, max_pages=5)
+    markets = await rest.get_markets_via_events(status="open", limit=200, max_pages=20)
     active = [m for m in markets if m.is_tradeable]
     # `has_live_quote`, not `is not None`: Kalshi reports an unquoted market as a
     # $0.00/$1.00 book rather than as a null, so the null test passed literally

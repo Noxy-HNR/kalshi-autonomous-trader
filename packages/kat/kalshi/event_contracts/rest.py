@@ -142,6 +142,38 @@ class EventContractsREST:
             params["status"] = status
         return await self.http.paginate("/events", key="events", params=params, limit=limit)
 
+    async def get_markets_via_events(
+        self, *, status: str | None = "open", limit: int = 200, max_pages: int = 20
+    ) -> list[EventMarket]:
+        """Every open market, enumerated through its event.
+
+        ``GET /markets`` returns the same universe but in an order nothing can
+        use. On production it answers with tens of thousands of provisional
+        single-market shards that carry no quote at all, so the first N pages --
+        whatever N is -- are almost entirely unquoted. Scanning 30,000 of them
+        found four quoted markets and none with any volume.
+
+        The same universe reached through ``/events?with_nested_markets=true``
+        gives 14,433 markets of which 12,421 are quoted and 1,903 sit inside a
+        three-cent spread. Same exchange, same moment, same credentials: the
+        difference is entirely which listing you ask for.
+        """
+        params: dict[str, Any] = {"with_nested_markets": "true"}
+        if status:
+            params["status"] = status
+        events = await self.http.paginate(
+            "/events", key="events", params=params, limit=limit, max_pages=max_pages
+        )
+        markets: list[EventMarket] = []
+        for event in events:
+            for payload in event.get("markets") or ():
+                try:
+                    markets.append(EventMarket.parse(payload))
+                except Exception:
+                    # One malformed market must not cost us the other 14,432.
+                    continue
+        return markets
+
     async def get_series(self, series_ticker: str) -> dict[str, Any]:
         payload = await self.http.get(f"/series/{series_ticker}")
         return payload.get("series") or payload
