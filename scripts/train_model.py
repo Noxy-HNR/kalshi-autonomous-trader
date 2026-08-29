@@ -1,0 +1,366 @@
+"""Train a model from banked quotes, and deploy it if it earns deployment.
+
+Every piece of this existed already -- labellers, a point-in-time dataset
+builder, four trainer families, calibration, selection gates, a registry with
+deployment and rollback -- and nothing drove them. So no model was ever
+deployed, and ``no_model_probability`` was the single largest reason the
+platform declined to trade.
+
+What this does, in order:
+
+1. Rebuilds one :class:`MarketHistory` per market from the ``quotes`` table.
+2. Labels each decision time with :class:`ForwardMoveLabel`. The threshold is a
+   real distance rather than zero: "did it move at all" is not the question a
+   strategy that pays a spread and a fee is asking.
+3. Builds the matrix through the *same* ``FeaturePipeline`` the live worker
+   uses, so a number here and a number in production are the same number.
+4. Splits by time, never at random, and trains every family on identical data.
+5. Hands the result to :func:`select_best`, which applies the platform's own
+   hard gates and is entitled to return nothing.
+6. Registers the winner, and deploys it only when asked.
+
+Usage::
+
+    .venv/Scripts/python.exe scripts/train_model.py
+    .venv/Scripts/python.exe scripts/train_model.py --deploy
+
+Not deploying is the default, because deploying changes what a running platform
+does with money.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import re
+import sys
+from collections import defaultdict
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+from kat.common.enums import MarketType
+from kat.config.settings import AppSettings
+from kat.db.engine import get_database
+from kat.features.compute import EVENT_FEATURE_SET
+from kat.features.pipeline import (
+    BookObservation,
+    FeaturePipeline,
+    ForwardMoveLabel,
+    MarketHistory,
+    TickerObservation,
+    bars_from_mid_path,
+)
+from kat.marketdata.book import OrderBook
+from kat.models.registry import ModelRegistry
+from kat.models.selection import select_best
+from kat.models.trainers import temporal_split, train_all
+from kat.observability.logging import configure_logging, get_logger
+
+log = get_logger("train")
+
+#: A market needs enough distinct prices for a move label to carry information.
+#: One that never repriced contributes an all-constant column and teaches the
+#: model the base rate.
+MIN_DISTINCT_MIDS = 4
+
+#: And enough observations to fill the longest feature window.
+MIN_QUOTES = 120
+
+
+def _finite(value: float | None) -> bool:
+    return value is not None and value == value and abs(value) != float("inf")
+
+
+def _book(bid_cc: int, ask_cc: int, bid_qc: int | None, ask_qc: int | None) -> OrderBook | None:
+    """Rebuild a two-sided event book from one stored quote.
+
+    Kalshi's NO side is the reflection of the YES side, so a YES ask of 41c is a
+    NO bid of 59c. Reconstructing it that way rather than storing both keeps this
+    book identical in shape to the one the live engine holds.
+    """
+    if bid_cc is None or ask_cc is None or not 0 < bid_cc < ask_cc < 10_000:
+        return None
+    return OrderBook.from_event_contract_levels(
+        "x",
+        yes_levels=[(bid_cc, bid_qc or 10_000)],
+        no_levels=[(10_000 - ask_cc, ask_qc or 10_000)],
+    )
+
+
+async def fetch_close_times(tickers: list[str]) -> dict[str, int]:
+    """Close times for the markets being trained on.
+
+    ``time_to_expiry_ms`` is a required feature -- a contract five minutes from
+    resolution behaves nothing like one five days out, and a model blind to the
+    difference fits two regimes as one. It lives in the market definition, which
+    the quotes table does not carry, so it is fetched.
+
+    That it must be fetched at all is a gap worth naming: the engine already
+    reads these definitions to feed the news matcher and then discards them,
+    leaving the ``markets`` table empty. Persisting them would remove this
+    lookup and let training run with no network at all.
+    """
+    from kat.kalshi.auth import KalshiSigner
+    from kat.kalshi.event_contracts.rest import EventContractsREST
+    from kat.kalshi.http import KalshiHTTPClient
+    from kat.kalshi.ratelimit import RateLimiter
+
+    settings = AppSettings()
+    creds = settings.kalshi.active_credentials
+    signer = KalshiSigner.from_credentials(creds, label="event") if creds.configured else None
+    http = KalshiHTTPClient(
+        base_url=settings.kalshi.rest_base_url,
+        signer=signer,
+        rate_limiter=RateLimiter(),
+        is_perp=False,
+    )
+    rest = EventContractsREST(http)
+
+    closes: dict[str, int] = {}
+    missing = 0
+    try:
+        for ticker in tickers:
+            try:
+                market = await rest.get_market(ticker)
+            except Exception:
+                missing += 1
+                continue
+            if market.close_time is not None:
+                closes[ticker] = int(market.close_time.timestamp() * 1000)
+            else:
+                missing += 1
+    finally:
+        await http.aclose()
+    log.info("train.close_times", resolved=len(closes), unavailable=missing)
+    return closes
+
+
+async def load_histories(hours: int, limit_markets: int) -> dict[str, MarketHistory]:
+    """Rebuild per-market history from the quotes table."""
+    import asyncpg
+
+    dsn = re.sub(r"^postgresql\+\w+", "postgresql", str(AppSettings().database.url))
+    conn = await asyncpg.connect(dsn)
+    try:
+        since = datetime.now(UTC) - timedelta(hours=hours)
+        candidates = await conn.fetch(
+            """
+            select ticker
+            from quotes
+            where market_type = 'event' and ts >= $1
+              and bid_cc is not null and ask_cc is not null
+            group by ticker
+            having count(*) >= $2
+               and count(distinct (bid_cc + ask_cc) / 2) >= $3
+            order by count(*) desc
+            limit $4
+            """,
+            since, MIN_QUOTES, MIN_DISTINCT_MIDS, limit_markets,
+        )
+        tickers = [r["ticker"] for r in candidates]
+        log.info("train.markets_selected", markets=len(tickers), hours=hours)
+        if not tickers:
+            return {}
+
+        rows = await conn.fetch(
+            """
+            select ticker, ts, bid_cc, ask_cc, bid_size_qc, ask_size_qc,
+                   last_cc, volume_qc, open_interest_qc
+            from quotes
+            where market_type = 'event' and ts >= $1 and ticker = any($2::text[])
+            order by ticker, ts
+            """,
+            since, tickers,
+        )
+    finally:
+        await conn.close()
+
+    books: dict[str, list[BookObservation]] = defaultdict(list)
+    ticks: dict[str, list[TickerObservation]] = defaultdict(list)
+    mids: dict[str, list[tuple[int, int]]] = defaultdict(list)
+
+    for row in rows:
+        ts_ms = int(row["ts"].timestamp() * 1000)
+        book = _book(row["bid_cc"], row["ask_cc"], row["bid_size_qc"], row["ask_size_qc"])
+        if book is None:
+            continue
+        ticker = row["ticker"]
+        books[ticker].append(BookObservation(ts_ms=ts_ms, book=book))
+        if book.mid_cc is not None:
+            mids[ticker].append((ts_ms, book.mid_cc))
+        if row["volume_qc"] is not None or row["last_cc"] is not None:
+            ticks[ticker].append(
+                TickerObservation(
+                    ts_ms=ts_ms,
+                    volume_qc=row["volume_qc"],
+                    open_interest_qc=row["open_interest_qc"],
+                    last_trade_cc=row["last_cc"],
+                )
+            )
+
+    usable = [t for t, obs in books.items() if len(obs) >= MIN_QUOTES]
+    closes = await fetch_close_times(usable)
+
+    histories: dict[str, MarketHistory] = {}
+    for ticker in usable:
+        close_ms = closes.get(ticker)
+        if close_ms is None:
+            # Dropped rather than defaulted. A guessed expiry puts a wrong number
+            # into a required feature, and the model then learns a relationship
+            # that is not there -- worse than a smaller dataset.
+            continue
+        histories[ticker] = MarketHistory(
+            ticker,
+            MarketType.EVENT,
+            books=books[ticker],
+            bars=bars_from_mid_path(mids[ticker], period_ms=60_000),
+            tickers=ticks.get(ticker, []),
+            close_ts_ms=close_ms,
+        )
+    log.info(
+        "train.histories_built",
+        markets=len(histories),
+        observations=sum(len(books[t]) for t in histories),
+    )
+    return histories
+
+
+def _balance(y: Any) -> str:
+    n = len(y)
+    if not n:
+        return "0"
+    positives = int(sum(y))
+    return f"{n} ({positives} pos, {positives / n:.1%})"
+
+
+def _report(models: list[Any]) -> None:
+    print()
+    print(f"  {'family':<16}{'val AUC':>10}{'val Brier':>12}{'test AUC':>10}  note")
+    for model in models:
+        if model.failed:
+            print(f"  {model.name:<16}{'--':>10}{'--':>12}{'--':>10}  FAILED: {model.failed[:40]}")
+            continue
+        val, test = model.validation_metrics, model.test_metrics
+        auc, t_auc = val.get("auc"), test.get("auc")
+        auc_s = f"{auc:.4f}" if _finite(auc) else "n/a"
+        t_auc_s = f"{t_auc:.4f}" if _finite(t_auc) else "n/a"
+        print(
+            f"  {model.name:<16}{auc_s:>10}"
+            f"{val.get('brier', float('nan')):>12.4f}{t_auc_s:>10}"
+        )
+
+
+async def main() -> int:
+    parser = argparse.ArgumentParser(description="Train and optionally deploy a model.")
+    parser.add_argument("--hours", type=int, default=96, help="how much history to use")
+    parser.add_argument("--markets", type=int, default=150, help="most-active markets to include")
+    parser.add_argument("--horizon-min", type=int, default=30, help="forward window, minutes")
+    parser.add_argument(
+        "--threshold-cc",
+        type=int,
+        default=50,
+        help="how far the mid must move to count. Zero would train on 'moved at "
+             "all', which is not the question a strategy paying a spread asks.",
+    )
+    parser.add_argument("--step-min", type=int, default=1, help="minutes between decision times")
+    parser.add_argument("--deploy", action="store_true", help="deploy if it clears the gates")
+    args = parser.parse_args()
+
+    configure_logging("WARNING")
+
+    histories = await load_histories(args.hours, args.markets)
+    if not histories:
+        print("  no markets with enough price variation to train on.", file=sys.stderr)
+        return 1
+
+    pipeline = FeaturePipeline(EVENT_FEATURE_SET)
+    dataset = pipeline.build_dataset(
+        list(histories.values()),
+        labeller=ForwardMoveLabel(
+            horizon_ms=args.horizon_min * 60_000, threshold_cc=args.threshold_cc
+        ),
+        step_ms=args.step_min * 60_000,
+        name=f"event_forward_move_{args.horizon_min}m",
+    )
+
+    print()
+    print(f"  markets  {len(set(dataset.tickers))}")
+    print(f"  dataset  rows={dataset.n_rows} features={dataset.n_features}")
+    print(f"  label    move > {args.threshold_cc}cc within {args.horizon_min}m")
+    print(f"  positive rate: {dataset.positive_rate:.4f}")
+    if dataset.n_rows < 500:
+        print("  too few rows to train on honestly; collect more data.", file=sys.stderr)
+        return 1
+
+    split = temporal_split(dataset.X, dataset.y, timestamps=dataset.as_of_ms)
+    print(
+        f"  split    train={_balance(split.y_train)}  "
+        f"val={_balance(split.y_val)}  test={_balance(split.y_test)}"
+    )
+    # A base rate that shifts hard between splits is the thing most likely to
+    # sink calibration, and it is invisible in an averaged metric. Say it here.
+    rates = [float(sum(y)) / len(y) for y in (split.y_train, split.y_val, split.y_test) if len(y)]
+    if rates and max(rates) - min(rates) > 0.15:
+        print(
+            "  WARNING: the base rate moves sharply across the splits, so the test "
+            "window is a different regime from the training one. Expect calibration "
+            "to fail its gate; that is the data speaking, not the model."
+        )
+
+    models = train_all(split, list(dataset.feature_names))
+    _report(models)
+
+    trained = [m for m in models if m.failed is None]
+    if not trained:
+        print("\n  every family failed to train.", file=sys.stderr)
+        return 1
+
+    # The platform's own gates, not a hand-rolled pick.
+    #
+    # select_best is entitled to return nothing, and that refusal is the feature:
+    # deploying the least bad of several failing models is how a platform ends up
+    # trading on noise. When it refuses, the answer is more data or a better
+    # target -- never a lower gate.
+    result = select_best(trained)
+    print("\n  selection gates")
+    for candidate in result.candidates:
+        mark = "PASS" if candidate.passed else "fail"
+        why = "" if candidate.passed else "  <- " + "; ".join(candidate.failures)
+        print(f"    {candidate.model.name:<16}{mark}  score={candidate.score:.4f}{why}")
+
+    if result.best is None:
+        print("\n  NOTHING DEPLOYED: no family cleared the gates.", file=sys.stderr)
+        print(f"  {result.reason}", file=sys.stderr)
+        return 2
+
+    winner = result.best
+    print(f"\n  winner: {winner.name}")
+    print(f"    validation: {winner.validation_metrics}")
+    print(f"    test:       {winner.test_metrics}")
+
+    database = get_database(AppSettings())
+    await database.connect()
+    try:
+        registry = ModelRegistry(database)
+        registered = await registry.register(
+            winner,
+            market_type=MarketType.EVENT,
+            target=f"forward_move_{args.horizon_min}m",
+            dataset_id=dataset.dataset_id,
+            feature_set_id=EVENT_FEATURE_SET.feature_set_id,
+        )
+        print(f"\n  registered: {registered.model_id} v{registered.version}")
+
+        if args.deploy:
+            await registry.deploy(registered.model_id, registered.version)
+            print(f"  DEPLOYED:   {registered.model_id} v{registered.version}")
+            print("  restart the engine to pick it up.")
+        else:
+            print("  not deployed. Re-run with --deploy when you want it live.")
+    finally:
+        await database.disconnect()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(asyncio.run(main()))
