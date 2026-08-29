@@ -512,7 +512,22 @@ class TradingLoop:
                 if snapshot.ticker in self.fee_schedules
                 else None
             ),
+            # Decided here rather than in the strategy: only the market state
+            # sees every market at once, which is what separates "this market is
+            # quiet" from "the connection is gone". Both look identical from one
+            # snapshot's timestamp.
+            feed_live=self._feed_live(now_ms),
         )
+
+    def _feed_live(self, now_ms: int) -> bool:
+        """Whether the feed as a whole is currently delivering.
+
+        Measured against the same budget a single market gets, so a feed that
+        has gone quiet for longer than one market may be stale stops vouching
+        for any of them.
+        """
+        age = self.market_state.feed_age_ms(now_ms=now_ms)
+        return age is not None and age <= self.market_state.max_age_ms
 
     def _position_qc(self, ticker: str) -> int:
         state = self.account_state

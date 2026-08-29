@@ -151,11 +151,22 @@ def data_age_ms(ctx: StrategyContext) -> int | None:
 
 
 def screen_freshness(ctx: StrategyContext, max_age_ms: int) -> str | None:
-    """``None`` when the snapshot is fresh enough to act on, else a skip reason."""
+    """``None`` when the snapshot is fresh enough to act on, else a skip reason.
+
+    A market older than ``max_age_ms`` is still actable when the feed is known
+    to be delivering, because this is a delta feed: the exchange sends a message
+    when the book *changes*, so silence on one market usually means our copy is
+    still exact. That judgement is not made here -- ``ctx.feed_live`` carries it
+    from the component that owns the connection and can see every market at
+    once, which is the only place the two kinds of silence are distinguishable.
+
+    When it is not supplied the age check stands alone, so a backtest building
+    contexts by hand keeps the older, stricter behaviour.
+    """
     age = data_age_ms(ctx)
     if age is None:
         return SKIP_NO_TIMESTAMP
-    if age > max_age_ms:
+    if age > max_age_ms and not ctx.feed_live:
         return SKIP_STALE
     return None
 

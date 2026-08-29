@@ -124,3 +124,47 @@ def test_stats_expose_the_feed_liveness_used_for_the_decision() -> None:
     stats = state.stats(now_ms=T0 + 1_500)
     assert stats["feed_age_ms"] == 1_500
     assert stats["quiet_max_age_ms"] == QUIET
+
+
+# -- the strategy-level screen must agree with the loop ----------------------
+#
+# Freshness was checked in three places: the loop's gate, the loop's
+# per-strategy gate, and each strategy's own screen. The first two learned that
+# a quiet market on a live feed is actable; the third did not, so strategies
+# went on declining markets the loop had just admitted, and stale_market_data
+# stayed the single largest skip reason. These pin the two halves together.
+
+from kat.marketdata.state import MarketSnapshot  # noqa: E402
+from kat.strategies.base import StrategyContext  # noqa: E402
+from kat.strategies.proposal import SKIP_NO_TIMESTAMP, SKIP_STALE, screen_freshness  # noqa: E402
+
+
+def _ctx(*, age_ms: int, feed_live: bool | None) -> StrategyContext:
+    snap = MarketSnapshot(ticker="X", market_type=MarketType.EVENT)
+    snap.updated_ms = T0
+    return StrategyContext(now_ms=T0 + age_ms, market=snap, feed_live=feed_live)
+
+
+def test_strategy_screen_accepts_a_fresh_market() -> None:
+    assert screen_freshness(_ctx(age_ms=1_000, feed_live=True), BUDGET) is None
+
+
+def test_strategy_screen_accepts_a_quiet_market_on_a_live_feed() -> None:
+    """The case that kept stale_market_data as the top skip reason."""
+    assert screen_freshness(_ctx(age_ms=BUDGET * 3, feed_live=True), BUDGET) is None
+
+
+def test_strategy_screen_rejects_a_stale_market_on_a_dead_feed() -> None:
+    assert screen_freshness(_ctx(age_ms=BUDGET * 3, feed_live=False), BUDGET) == SKIP_STALE
+
+
+def test_strategy_screen_keeps_the_strict_rule_when_liveness_is_unknown() -> None:
+    """Backtests build contexts by hand and must not silently loosen."""
+    assert screen_freshness(_ctx(age_ms=BUDGET * 3, feed_live=None), BUDGET) == SKIP_STALE
+
+
+def test_strategy_screen_still_refuses_an_unstamped_snapshot() -> None:
+    """A live feed does not excuse a market we have never received."""
+    snap = MarketSnapshot(ticker="X", market_type=MarketType.EVENT)
+    ctx = StrategyContext(now_ms=T0, market=snap, feed_live=True)
+    assert screen_freshness(ctx, BUDGET) == SKIP_NO_TIMESTAMP

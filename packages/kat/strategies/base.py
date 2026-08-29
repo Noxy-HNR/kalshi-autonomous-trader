@@ -179,6 +179,18 @@ class StrategyContext:
     research: dict[str, Any] = field(default_factory=dict)
     # Fee schedule in force, so expected value can be computed net of costs.
     fee_multiplier: float | None = None
+    #: Whether the feed itself is delivering, decided by the component that owns
+    #: the connection rather than re-derived from this snapshot's age.
+    #:
+    #: A strategy cannot tell the two kinds of silence apart from a timestamp
+    #: alone. On a delta feed a market that has sent nothing is usually saying
+    #: the book is unchanged; the same age with the connection dropped means the
+    #: opposite. Only :class:`~kat.marketdata.state.MarketState` knows which,
+    #: because only it sees every market at once.
+    #:
+    #: ``None`` means "not supplied" -- backtests construct contexts directly --
+    #: and the age check then stands alone, which is the older, stricter rule.
+    feed_live: bool | None = None
 
     def feature(self, name: str, default: float = 0.0) -> float:
         return self.features.get(name, default)
