@@ -305,6 +305,12 @@ export interface NewsRow {
 export interface SystemStatus {
   process: Record<string, number | null>;
   host: Record<string, number>;
+  remote_access?: {
+    installed: boolean;
+    connected: boolean;
+    address: string | null;
+    env_override: string;
+  };
   market_data: Record<string, Record<string, unknown>>;
   metrics: {
     uptime_s: number;

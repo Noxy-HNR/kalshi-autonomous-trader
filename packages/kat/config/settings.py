@@ -424,6 +424,17 @@ class AppSettings(BaseSettings):
     # -- host / process ------------------------------------------------------
     api_host: str = "127.0.0.1"
     api_port: int = Field(default=8000, ge=1, le=65_535)
+    # How the dashboard is reachable from another device.
+    #
+    # "off"       -- loopback only. Nothing outside this machine can reach it.
+    # "tailscale" -- also bind to this machine's tailnet address, so your own
+    #                devices can reach it over WireGuard and nothing else can.
+    #
+    # There is deliberately no option that binds every interface. The API has no
+    # authentication by design (see docs/SECURITY.md), so the network is the
+    # authentication, and kat.net.tailscale refuses any address that is not
+    # private by construction.
+    api_remote_access: Literal["off", "tailscale"] = "off"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_dir: str = "logs"
     data_dir: str = "data"

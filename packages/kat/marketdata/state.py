@@ -7,9 +7,21 @@ view of "what is the market right now" lives in this process's memory.
 
 Freshness is a first-class property. Each market records when it was last
 updated, and :meth:`MarketState.is_fresh` is consulted before any decision. Data
-older than the configured budget does not produce a cautious decision -- it
-produces no decision at all, because a stale book is a book that may be
-crossed, empty or gone.
+that is genuinely stale does not produce a cautious decision -- it produces no
+decision at all, because a stale book is a book that may be crossed, empty or
+gone.
+
+What "stale" means on a delta feed
+----------------------------------
+The exchange sends a message when a book *changes*. Silence on one market is
+therefore usually a statement that our copy is still exact, not evidence that it
+has decayed. The silence that means danger is silence across the whole feed,
+because that is indistinguishable from being disconnected.
+
+So this class tracks two clocks: per-market ``updated_ms``, and
+``last_message_ms`` for the feed as a whole. :meth:`is_fresh` uses both, and
+only this class can, because only it sees every market at once. See that method
+for the rule and for what it replaced.
 """
 
 from __future__ import annotations

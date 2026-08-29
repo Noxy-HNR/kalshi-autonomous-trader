@@ -468,6 +468,35 @@ CONTROLS: list[dict[str, str]] = [
         ),
     },
     {
+        "anchor": "control-remote-access",
+        "term": "Remote access",
+        "short": "Opening this dashboard from your phone or another laptop.",
+        "body": (
+            "By default the dashboard answers only on the machine it is running "
+            "on. Type its address into another device and nothing happens, "
+            "because nothing outside this computer can reach it at all.\n\n"
+            "That default exists because this dashboard has no password. It can "
+            "stop trading, change how much money may be risked, and cancel every "
+            "order. Putting it on an ordinary home or office network would mean "
+            "anything else on that network could do those things too.\n\n"
+            "The supported way to reach it from elsewhere is Tailscale, a free "
+            "private network you install on your own devices. It gives each of "
+            "your devices an address only your other devices can reach: there is "
+            "no route to it from the internet, and traffic between them is "
+            "encrypted. Set KAT_API_REMOTE_ACCESS=tailscale in your .env file, "
+            "restart, and the dashboard answers on that address instead.\n\n"
+            "To set it up: install Tailscale on this machine and on the phone or "
+            "laptop you want to use, sign both into the same account, then set "
+            "that line and restart. The System page will show the address to "
+            "open, and the launcher prints it too.\n\n"
+            "If Tailscale is not installed or not running, the platform still "
+            "starts -- it just stays reachable from this machine only, and says "
+            "so. It will never fall back to something more open. There is no "
+            "setting that exposes it to everything, which is deliberate: that is "
+            "the mistake this design exists to make impossible."
+        ),
+    },
+    {
         "anchor": "control-tuning",
         "term": "Risk tuning",
         "short": "Adjust the limits. Changes are live, audited and permanent.",

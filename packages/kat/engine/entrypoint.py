@@ -56,6 +56,7 @@ from kat.kalshi.ws import KalshiWebSocket
 from kat.marketdata.state import MarketState
 from kat.models.inference import InferenceEngine
 from kat.models.registry import ModelRegistry
+from kat.net.tailscale import resolve_bind_host
 from kat.news.pipeline import NewsPipeline
 from kat.observability.logging import configure_logging, get_logger
 from kat.research.loop import ResearchLoop
@@ -705,9 +706,17 @@ class Platform:
         import uvicorn
         from apps.api.main import app as fastapi_app
 
+        # Resolved rather than taken as configured. This refuses to bind an
+        # unauthenticated API to every interface, and turns
+        # KAT_API_REMOTE_ACCESS=tailscale into this machine's tailnet address.
+        host = resolve_bind_host(
+            self.settings.api_host, remote_access=self.settings.api_remote_access
+        )
+        self.api_bound_host = host
+
         config = uvicorn.Config(
             fastapi_app,
-            host=self.settings.api_host,
+            host=host,
             port=self.settings.api_port,
             log_level="warning",
             access_log=False,
@@ -719,7 +728,8 @@ class Platform:
         self._api_task = asyncio.create_task(self._api_server.serve(), name="dashboard-api")
         log.info(
             "api.started",
-            url=f"http://{self.settings.api_host}:{self.settings.api_port}",
+            url=f"http://{host}:{self.settings.api_port}",
+            remote_access=self.settings.api_remote_access,
         )
 
     async def _stop_api(self) -> None:
@@ -806,7 +816,7 @@ async def run(settings: AppSettings | None = None) -> int:
         report = await platform.app.start()
         platform._publish_trading_gate()
 
-        banner(settings, report.trading_permitted)
+        banner(settings, report.trading_permitted, getattr(platform, 'api_bound_host', None))
         await platform.app.run_until_stopped()
         return 0
     except KeyboardInterrupt:
@@ -820,8 +830,15 @@ async def run(settings: AppSettings | None = None) -> int:
         await platform.aclose()
 
 
-def banner(settings: AppSettings, trading_permitted: bool) -> None:
+def _is_tailnet(host: str) -> bool:
+    from kat.net.tailscale import is_tailscale_address
+
+    return is_tailscale_address(host)
+
+
+def banner(settings: AppSettings, trading_permitted: bool, bound_host: str | None = None) -> None:
     """Say plainly what mode this process is in. Ambiguity here is dangerous."""
+    bound_host = bound_host or settings.api_host
     environment = settings.environment.value.upper()
     real_money = settings.can_submit_real_orders
     lines = [
@@ -832,7 +849,8 @@ def banner(settings: AppSettings, trading_permitted: bool) -> None:
         f"  MODE:        {settings.operating_mode.value}",
         f"  TRADING:     {'permitted' if trading_permitted else 'HALTED'}",
         f"  MAX PERP LEVERAGE: {MAX_PERP_LEVERAGE:.2f}x  (architectural, not configurable)",
-        f"  DASHBOARD:   http://{settings.api_host}:{settings.api_port}",
+        f"  DASHBOARD:   http://{bound_host}:{settings.api_port}"
+        + ("   (reachable over your tailnet)" if _is_tailnet(bound_host) else ""),
         "=" * 68,
         "",
     ]

@@ -229,6 +229,13 @@ export const PAGE: Record<string, ReactNode> = {
     </>
   ),
 
+  remoteAccess:
+    "Whether you can open this dashboard from another device. By default it " +
+    "answers only on the machine it runs on, so nothing else on any network " +
+    "can reach it. Turning on Tailscale mode binds it to a private tunnel " +
+    "address instead: your own devices can reach it, and nothing else can. " +
+    "There is no setting that opens it to everything, because this page can " +
+    "stop trading and change risk limits and it has no password.",
   system: (
     <>
       <strong>Whether the machinery itself is healthy.</strong> Not about profit — about

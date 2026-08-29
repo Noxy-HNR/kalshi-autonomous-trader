@@ -5,7 +5,7 @@
  */
 
 import { api, type SystemStatus } from "@/lib/api";
-import { ErrorBox, Help, Pill, Stat, usePoll } from "@/components/ui";
+import { ErrorBox, Help, Pill, Stat, docsLink, usePoll } from "@/components/ui";
 import { PAGE } from "@/lib/explainers";
 
 function histogram(
@@ -56,6 +56,52 @@ export default function SystemPage() {
               small
             />
             <Stat label="Threads" value={String(data.process.threads ?? 0)} small />
+          </div>
+
+          <h2 {...docsLink("control-remote-access")}>
+            Remote access <Help wide>{PAGE.remoteAccess}</Help>
+          </h2>
+          <div className="card">
+            {(() => {
+              const ra = data.remote_access;
+              if (!ra) return <div className="muted small">Not reported by this engine.</div>;
+              if (ra.connected)
+                return (
+                  <>
+                    <div className="row" style={{ gap: 10, alignItems: "center" }}>
+                      <Pill tone="good">reachable</Pill>
+                      <code className="mono">{ra.address}</code>
+                    </div>
+                    <div className="small muted" style={{ marginTop: 8 }}>
+                      Open the dashboard from any device on your tailnet at{" "}
+                      <code className="mono">http://{ra.address}:3030</code>. Only devices you
+                      have authorised can reach it; there is no route from the public internet.
+                    </div>
+                  </>
+                );
+              if (ra.env_override !== "tailscale")
+                return (
+                  <>
+                    <Pill tone="neutral">off &mdash; this machine only</Pill>
+                    <div className="small muted" style={{ marginTop: 8 }}>
+                      Set <code className="mono">KAT_API_REMOTE_ACCESS=tailscale</code> in{" "}
+                      <code className="mono">.env</code> and restart to reach this from your
+                      phone or another laptop.
+                    </div>
+                  </>
+                );
+              return (
+                <>
+                  <Pill tone="warn">requested, not connected</Pill>
+                  <div className="small muted" style={{ marginTop: 8 }}>
+                    {ra.installed
+                      ? "Tailscale is installed but this machine has no tailnet address — run `tailscale up`, then restart the platform."
+                      : "Tailscale is not installed on this machine. Install it, run `tailscale up`, then restart the platform."}{" "}
+                    The dashboard stays on loopback until then, which is the safe direction.
+                  </div>
+                </>
+              );
+            })()}
           </div>
 
           <h2>Market data feeds</h2>

@@ -115,12 +115,53 @@ all; the redactor is a backstop, not a licence.
 
 ## 4. Dashboard and API exposure
 
-The API binds to `127.0.0.1` by default. **Do not bind it to `0.0.0.0` on a
-machine reachable from the internet** — it exposes kill switches, mode changes
-and risk configuration.
+The API has **no authentication**, by design. It can engage kill switches, change
+the operating mode and move risk limits, and putting a login in front of that
+would mean inventing a session and password story for a single-operator tool. The
+decision is that **the network is the authentication**: the API answers only on
+addresses that are private by construction.
 
-If remote access is needed, put it behind an SSH tunnel or a VPN rather than
-adding authentication to the API surface:
+`kat.net.tailscale.resolve_bind_host` enforces that. It is not advice — binding
+to `0.0.0.0`, `::`, or any LAN address raises `RemoteAccessError` and the
+platform does not start. There is no setting that overrides it.
+
+### Reaching it from another device
+
+Set one variable:
+
+```
+KAT_API_REMOTE_ACCESS=tailscale
+```
+
+The platform finds this machine's Tailscale address (`tailscale ip -4`, falling
+back to interface inspection) and binds the API and the dashboard to it. Both
+then answer on your tailnet and nowhere else.
+
+Tailscale rather than a LAN address or a port-forward because a tailnet address
+is a WireGuard tunnel endpoint: it exists only while the tunnel is up, only
+devices you have authorised can route to it, traffic is encrypted end-to-end so
+the absence of TLS on the dashboard is not the exposure it would otherwise be,
+and access is revoked by removing the device from the tailnet — a control that
+lives outside this process and cannot be undone by anything running in it.
+
+Setup, once:
+
+1. Install Tailscale on this machine **and** on the device you want to use.
+2. Run `tailscale up` on both, signing into the same tailnet.
+3. Set `KAT_API_REMOTE_ACCESS=tailscale` and restart.
+
+The launcher prints the reachable URL, and `/api/system` reports
+`remote_access` with `installed`, `connected` and `address` — because "I set it
+up and it isn't working" otherwise looks identical to "it is working", since
+both load fine on the machine they run on.
+
+**If Tailscale is not running the platform still starts, on loopback, and logs
+`remote_access.tailscale_unavailable`.** The fallback is deliberately toward
+*less* exposure: a trading platform that refuses to start because a VPN is down
+is worse than one reachable only from its own machine.
+
+An SSH tunnel remains a fine alternative and needs no setting, since it
+terminates on loopback:
 
 ```bash
 ssh -L 8000:127.0.0.1:8000 user@server

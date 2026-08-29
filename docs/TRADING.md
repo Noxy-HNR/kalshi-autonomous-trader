@@ -283,6 +283,22 @@ red pulsing border and explicit "REAL MONEY AT RISK" text.
 ## What the platform will not do
 
 - Trade on stale data. Stale produces *no* decision, not a cautious one.
+
+  "Stale" is measured against the feed, not just the clock. This is a delta feed:
+  the exchange sends a message when a book *changes*, so a market that has been
+  silent is usually reporting that our copy is still exact. A market is tradeable
+  when it updated within the budget, **or** when the feed as a whole delivered
+  within the budget and this market updated within a bounded quiet window
+  (`KAT_QUIET_MARKET_MAX_AGE_MS`, default 5 minutes).
+
+  The dangerous silence is silence everywhere, because that is indistinguishable
+  from being disconnected — and when it happens every market in the domain goes
+  stale at once. Measuring each market against a five-second clock instead meant
+  nine cycles in ten declined every market being watched, which is not caution;
+  it is a platform that cannot trade. The judgement is made once, by the
+  component that owns the connection, and travels to strategies on
+  `StrategyContext.feed_live` rather than being re-derived from a timestamp that
+  cannot distinguish the two cases.
 - Resume after a failed reconciliation.
 - Retry an order whose outcome it does not know.
 - Exceed 1.00× perpetual leverage under any circumstance, from any code path.

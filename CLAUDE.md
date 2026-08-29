@@ -138,10 +138,13 @@ Package map (`packages/kat/`): `common` (fixed-point money, Clock, ids),
 
 - Secrets never get committed — only `.env.example` is tracked. Always run
   `git check-ignore -v .env .db_password` before pushing.
-- The dashboard API binds to `127.0.0.1` by default and must not be bound to
-  `0.0.0.0` on an internet-reachable machine. For remote access, use an SSH
-  tunnel or a VPN (e.g. Tailscale) rather than adding auth to the API surface
-  — see [docs/SECURITY.md](docs/SECURITY.md) §4.
+- The dashboard API has no authentication and must not gain any: the network is
+  the authentication. `kat.net.tailscale.resolve_bind_host` enforces this — it
+  raises `RemoteAccessError` for `0.0.0.0`, `::` or any LAN address, and there is
+  no setting that overrides it. Remote access is `KAT_API_REMOTE_ACCESS=tailscale`,
+  which binds this machine's tailnet address; if Tailscale is down it falls back
+  to loopback rather than to something wider. See
+  [docs/SECURITY.md](docs/SECURITY.md) §4.
 - Kalshi private keys are loaded from a file path, never inlined; event and
   perp credentials are separate identities by design (don't merge them).
 - Log redaction is a structlog processor, not caller discipline — but new log

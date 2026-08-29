@@ -228,6 +228,7 @@ to trade rather than assuming the optimistic case.**
 | WebSocket sequence gap | Fresh snapshot requested; deltas not applied to a book we cannot trust |
 | Delta leaves book crossed | Book discarded, re-snapshot requested |
 | Market data stale | No decision at all, not a cautious one |
+| Feed silent across every market | Every market in that domain goes stale at once |
 | Account state stale | Every order rejected |
 | Perp equity unknown | Exposure-increasing orders blocked; reductions permitted |
 | Database unavailable | Writes queue and degrade; trading path unaffected |

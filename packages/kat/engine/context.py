@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any
 
 from kat.common.enums import KillSwitchScope, MarketType, OperatingMode
 from kat.common.fixedpoint import micros_to_decimal
+from kat.net.tailscale import remote_access_status
 from kat.observability.logging import get_logger
 from kat.observability.metrics import metrics
 from kat.risk.invariants import MAX_PERP_LEVERAGE
@@ -224,6 +225,11 @@ class EngineContext:
                 "disk_free_gb": round(disk.free / 1_073_741_824, 1),
                 "disk_pct": disk.percent,
             },
+            # Whether this dashboard is reachable from another device, and how.
+            # Shown because "I set it up and it isn't working" is otherwise
+            # indistinguishable from "it is working": both look like a page that
+            # loads on the machine it runs on.
+            "remote_access": remote_access_status(),
             "market_data": {
                 domain.value: state.stats(now_ms=now_ms)
                 for domain, state in self.market_states.items()

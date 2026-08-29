@@ -16,13 +16,34 @@ To generate a startup entry:
 .venv/Scripts/python.exe -m kat.engine.service
 ```
 
-That writes `deploy/kat.service` and prints the `schtasks` command. It **installs
-nothing** — registering a startup entry modifies the machine and is your call.
+That writes `deploy/kat.service`, `deploy/kat-task.xml` and a README, and prints
+the registration commands. It **installs nothing** — registering a startup entry
+modifies the machine and is your call.
 
 ### Windows
 
-A Scheduled Task at logon, at LIMITED integrity. Nothing needs elevation, and a
-trading process running as Administrator enlarges the blast radius for no benefit.
+A Scheduled Task at logon that **restarts the process if it dies** (every minute,
+up to 999 times), at LIMITED integrity. Nothing needs elevation, and a trading
+process running as Administrator enlarges the blast radius for no benefit.
+
+Registered from XML rather than `schtasks` switches, because restart-on-failure
+cannot be expressed as a switch and three of the task engine's defaults would
+otherwise stop a long-running process on their own: it halts tasks after three
+days, stops them when the machine goes on battery, and stops them when the
+machine stops being idle. The generated XML overrides all four.
+
+```
+schtasks /Create /TN "KalshiAutonomousTrader" /XML "deploy\kat-task.xml" /F
+```
+
+### Knowing it went down
+
+Every start reports how long the platform was not running. The health loop writes
+a heartbeat every 30 seconds, so a start after an unclean stop logs
+`app.previous_shutdown_was_unclean` with `downtime_s` — the difference between
+knowing it restarted and knowing nobody was watching the positions for five
+hours. When the previous run left no heartbeat the field is `null`, not `0`:
+an unknown gap is not a proven-absent one.
 
 ### Linux
 
@@ -42,7 +63,21 @@ back in whatever mode its configuration says.
 ## Monitoring
 
 The dashboard's System tab shows process and host resources, queue depths, latency
-as **tail percentiles**, market-data freshness, and component health.
+as **tail percentiles**, market-data freshness, component health, and whether
+remote access is connected.
+
+The trading loop also logs a `trading.summary` line every 60 seconds with what it
+examined and, when nothing traded, why each strategy declined:
+
+```
+trading.summary cycles=60 markets_examined=60 markets_skipped_stale=0
+  intents_generated=0 declined_because={"realized_vol_unavailable": 7080,
+  "no_model_probability": 3540, "too_far_from_expiry": 3422}
+```
+
+That is the first place to look when the platform is up and not trading. The
+tallies come from the strategies themselves and are also on `/api/strategies`
+under each strategy's `health`.
 
 Health from the command line:
 
