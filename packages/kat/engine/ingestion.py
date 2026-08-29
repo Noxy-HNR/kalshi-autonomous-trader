@@ -195,13 +195,28 @@ class MarketDataIngestor:
         from kat.marketdata.book import OrderBook
 
         if self.market_type is MarketType.EVENT:
+            # Kalshi names these three different ways across schema versions, and
+            # matching none of them is silent: `_levels(None)` is an empty book,
+            # `from_event_contract_levels` accepts it, and the snapshot applies
+            # as a market with no orders on either side. The book then rebuilds
+            # itself from whatever deltas happen to arrive next, which is a
+            # partial, usually one-sided view of a market that is in fact quoted
+            # on both sides.
+            #
+            # Live, that showed as 4 of 60 markets having a midpoint, ages of
+            # twenty-five minutes, and a dashboard that looked like nothing was
+            # being captured. The current production websocket sends
+            # `yes_dollars_fp` / `no_dollars_fp`; the older names are kept
+            # because demo still sends them.
             return OrderBook.from_event_contract_levels(
                 ticker,
-                _levels(payload.get("yes") or payload.get("yes_dollars")),
-                _levels(payload.get("no") or payload.get("no_dollars")),
+                _levels(_first(payload, "yes_dollars_fp", "yes_dollars", "yes")),
+                _levels(_first(payload, "no_dollars_fp", "no_dollars", "no")),
             )
         return OrderBook.from_two_sided_levels(
-            ticker, _levels(payload.get("bids")), _levels(payload.get("asks"))
+            ticker,
+            _levels(_first(payload, "bids_fp", "bids")),
+            _levels(_first(payload, "asks_fp", "asks")),
         )
 
     def _on_delta(self, message: dict[str, Any]) -> None:
@@ -384,6 +399,19 @@ class MarketDataIngestor:
             "websocket": self.ws.stats(),
             "messages": metrics.get_counter(M_WS_MESSAGES, domain=self.market_type.value),
         }
+
+
+def _first(payload: dict[str, Any], *names: str) -> Any:
+    """The first key present in ``payload``, or None.
+
+    Named lookups rather than a chain of ``or`` because an empty list is a
+    legitimate value that ``or`` would skip past to the next name -- a market
+    genuinely quoted on one side only would then be read with the wrong schema.
+    """
+    for name in names:
+        if name in payload:
+            return payload[name]
+    return None
 
 
 def _levels(raw: Any) -> list[tuple[int, int]]:
