@@ -94,6 +94,7 @@ export function Stat({
   tone,
   note,
   small,
+  docs,
   explain,
 }: {
   label: string;
@@ -102,9 +103,11 @@ export function Stat({
   note?: string;
   small?: boolean;
   explain?: React.ReactNode;
+  /** Docs anchor this figure is explained at, e.g. "concept-equity". */
+  docs?: string;
 }) {
   return (
-    <div className="card">
+    <div className="card" {...(docs ? docsLink(docs) : {})}>
       <h3>
         {label}
         {explain ? <Help>{explain}</Help> : null}

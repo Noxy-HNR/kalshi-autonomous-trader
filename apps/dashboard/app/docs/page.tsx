@@ -83,21 +83,63 @@ export default function DocsPage() {
   // Scroll to the anchor once content exists. The browser cannot do this
   // itself: the hash is present before the fetch resolves, so by the time the
   // target element is rendered the automatic scroll has already happened.
-  const jump = useCallback(() => {
+  const jump = useCallback((smooth: boolean) => {
     const hash = window.location.hash.slice(1);
     if (!hash) return;
     const el = document.getElementById(hash);
     if (!el) return;
-    el.scrollIntoView({ behavior: "smooth", block: "start" });
+    el.scrollIntoView({ behavior: smooth ? "smooth" : "auto", block: "start" });
     setHighlight(hash);
     window.setTimeout(() => setHighlight(null), 2400);
   }, []);
 
   useEffect(() => {
     if (!docs) return;
-    jump();
-    window.addEventListener("hashchange", jump);
-    return () => window.removeEventListener("hashchange", jump);
+
+    // Land on the anchor, then keep correcting until the page stops moving
+    // under us.
+    //
+    // Two things fought a single scroll here. The router restores scroll
+    // position after the route settles, so a smooth animation still in flight
+    // simply lost; and this page is long enough that fonts and reflow shift a
+    // target thousands of pixels after the first measurement -- a cold load
+    // aimed at an anchor two-thirds down came to rest 7,551px past it.
+    //
+    // So instead of guessing a delay, re-aim every frame for a short window and
+    // stop as soon as two consecutive frames agree the target is in place. That
+    // is robust to *why* the layout moved, which is the part not worth
+    // enumerating. It matters because every middle-click in the app opens this
+    // page in a new tab at an anchor: a jump that misses is the feature failing.
+    let frame = 0;
+    let settled = 0;
+    let raf = 0;
+
+    const settle = () => {
+      const hash = window.location.hash.slice(1);
+      const el = hash ? document.getElementById(hash) : null;
+      if (!el) return;
+      const off = el.getBoundingClientRect().top;
+      if (Math.abs(off) <= 2) {
+        // Two agreeing frames, so this is rest rather than a moment mid-reflow.
+        if (++settled >= 2) return;
+      } else {
+        settled = 0;
+        el.scrollIntoView({ behavior: "auto", block: "start" });
+      }
+      if (++frame < 90) raf = requestAnimationFrame(settle);
+    };
+
+    jump(false);
+    raf = requestAnimationFrame(settle);
+
+    // Navigating between anchors on a page already open should animate, so the
+    // reader can see they have moved rather than being teleported.
+    const onHashChange = () => jump(true);
+    window.addEventListener("hashchange", onHashChange);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("hashchange", onHashChange);
+    };
   }, [docs, jump]);
 
   const filter = query.trim().toLowerCase();

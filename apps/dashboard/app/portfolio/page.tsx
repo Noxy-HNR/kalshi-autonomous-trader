@@ -14,7 +14,7 @@
 
 import { api, usd, type Overview } from "@/lib/api";
 import { AreaChart, DonutChart, HBarChart, useSeries } from "@/components/charts";
-import { ErrorBox, Help, Stat, usePoll } from "@/components/ui";
+import { ErrorBox, Help, Stat, docsLink, usePoll } from "@/components/ui";
 import { PAGE } from "@/lib/explainers";
 
 interface AnyPosition {
@@ -82,28 +82,61 @@ export default function PortfolioPage() {
       {data ? (
         <>
           <div className="grid g4">
-            <Stat label="Total equity" value={usd(data.total_equity_usd)} />
+            <Stat
+              label="Total equity"
+              value={usd(data.total_equity_usd)}
+              docs="concept-equity"
+              explain={
+                "What the account is worth right now: cash plus what your open " +
+                "positions would fetch if you closed them. Every limit on this " +
+                "platform is a percentage of this number. Event contracts and " +
+                "perpetuals hold money separately on Kalshi, so this is the two added together."
+              }
+            />
             <Stat
               label="Total exposure"
               value={usd(String(eventExposure + perpExposure))}
               note="event + perp, open and pending"
               small
+              docs="concept-exposure"
+              explain={
+                "How much money is currently committed to positions rather than " +
+                "sitting as cash. Zero means nothing can be lost to a price move. " +
+                "It can never exceed your equity on perpetuals -- that is the 1x " +
+                "leverage cap, the one limit with no setting."
+              }
             />
             <Stat
               label="Realised P&L today"
               value={usd(String(eventPnl + perpPnl))}
               tone={eventPnl + perpPnl > 0 ? "good" : eventPnl + perpPnl < 0 ? "bad" : undefined}
               small
+              docs="concept-pnl"
+              explain={
+                "Profit and loss from positions closed today. Realised means the " +
+                "trade is finished and the money has actually moved -- unlike an " +
+                "open position showing a gain, which is only worth that if you " +
+                "close it now and pay the spread and fee to do so."
+              }
             />
             <Stat
               label="Open positions"
               value={String((data.event.open_positions ?? 0) + (data.perp.open_positions ?? 0))}
               note={`${data.event.open_positions ?? 0} event · ${data.perp.open_positions ?? 0} perp`}
               small
+              docs="concept-position"
+              explain={
+                "How many separate holdings are open. Each one ends either by you " +
+                "selling it -- which needs a buyer, so thin markets are refused -- " +
+                "or, for an event contract, by settling for $1.00 or nothing when " +
+                "the question is answered."
+              }
             />
           </div>
 
-          <h2>Equity over this session</h2>
+          <h2 {...docsLink("concept-equity")}>
+            Equity over this session <Help wide>{"Your total equity as it changes. Recorded by this browser while the page is open, not stored on the server, so it starts over on another device."}</Help>
+          </h2>
           <div className="card">
             <AreaChart points={equitySeries} format={(v) => usd(String(v))} color="var(--accent)" />
             <div className="note" style={{ marginBottom: 0 }}>
@@ -113,10 +146,14 @@ export default function PortfolioPage() {
             </div>
           </div>
 
-          <h2>Allocation</h2>
+          <h2 {...docsLink("concept-allocation")}>
+            Allocation <Help wide>{"How the account is divided between the two domains. Splitting it is what stops one confidently wrong strategy from taking the whole account."}</Help>
+          </h2>
           <div className="grid g2">
             <div className="card">
-              <h3>Equity by domain</h3>
+              <h3 {...docsLink("concept-equity")}>
+                Equity by domain <Help>{"How your equity splits between the two domains right now."}</Help>
+              </h3>
               <DonutChart
                 centerValue={usd(data.total_equity_usd, 0)}
                 centerLabel="total equity"
@@ -127,7 +164,9 @@ export default function PortfolioPage() {
               />
             </div>
             <div className="card">
-              <h3>Exposure by domain</h3>
+              <h3 {...docsLink("concept-exposure")}>
+                Exposure by domain <Help>{"How much of each domain's money is committed to open positions."}</Help>
+              </h3>
               <DonutChart
                 centerValue={usd(String(eventExposure + perpExposure), 0)}
                 centerLabel="total exposure"
@@ -139,7 +178,9 @@ export default function PortfolioPage() {
             </div>
           </div>
 
-          <h2>Top positions by size</h2>
+          <h2 {...docsLink("concept-position")}>
+            Top positions by size <Help wide>{"The largest holdings you currently have open, biggest first. Size here is what is at stake, not what it has made or lost."}</Help>
+          </h2>
           <div className="card">
             <HBarChart
               rows={positionBars}
@@ -148,7 +189,9 @@ export default function PortfolioPage() {
             />
           </div>
 
-          <h2>Today&rsquo;s P&amp;L by domain</h2>
+          <h2 {...docsLink("concept-pnl")}>
+            Today&rsquo;s P&amp;L by domain <Help wide>{"Profit and loss from positions closed today, split by domain. Only closed trades count here."}</Help>
+          </h2>
           <div className="card">
             <HBarChart
               rows={[
@@ -159,10 +202,14 @@ export default function PortfolioPage() {
             />
           </div>
 
-          <h2>Equity trend by domain</h2>
+          <h2 {...docsLink("concept-equity")}>
+            Equity trend by domain <Help wide>{"Event and perpetual equity tracked separately, because on Kalshi they are genuinely separate pots of money that only you can move between."}</Help>
+          </h2>
           <div className="grid g2">
             <div className="card">
-              <h3>Event equity</h3>
+              <h3 {...docsLink("concept-equity")}>
+                Event equity <Help>{"Equity behind event contracts only."}</Help>
+              </h3>
               <AreaChart
                 points={eventEquitySeries}
                 format={(v) => usd(String(v))}
@@ -171,7 +218,9 @@ export default function PortfolioPage() {
               />
             </div>
             <div className="card">
-              <h3>Perp equity</h3>
+              <h3 {...docsLink("concept-equity")}>
+                Perp equity <Help>{"Equity behind perpetuals only."}</Help>
+              </h3>
               <AreaChart
                 points={perpEquitySeries}
                 format={(v) => usd(String(v))}

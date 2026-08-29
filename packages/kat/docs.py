@@ -252,6 +252,94 @@ CONCEPTS: list[dict[str, str]] = [
             "received at 12:05 cannot influence a simulated trade at 12:01."
         ),
     },
+    {
+        "anchor": "concept-equity",
+        "term": "Equity",
+        "short": "What the account is worth right now, if everything were closed.",
+        "body": (
+            "Equity is your cash plus what your open positions are currently worth. "
+            "It is the number every limit on this platform is measured against: a "
+            "rule saying one position may use 10 percent means 10 percent of this.\n\n"
+            "It moves for two different reasons, and the difference matters. Cash "
+            "changes when a trade settles or a fee is charged, and that is final. "
+            "Position value changes as prices move, and that is not final until you "
+            "close -- a position showing a gain has not made you money yet.\n\n"
+            "Event contracts and perpetuals hold their money in separate places on "
+            "Kalshi, so this platform tracks two equity figures and shows the total. "
+            "Moving money between them is something only you can do, from Kalshi's "
+            "own site; the platform has no ability to do it."
+        ),
+    },
+    {
+        "anchor": "concept-exposure",
+        "term": "Exposure",
+        "short": "How much money is currently at risk, rather than sitting idle.",
+        "body": (
+            "Exposure is the total value of everything you currently hold. Equity is "
+            "what you have; exposure is how much of it is committed to positions "
+            "rather than waiting as cash.\n\n"
+            "Zero exposure means every dollar is sitting in cash and nothing can be "
+            "lost to a price move. Exposure equal to your equity means every dollar "
+            "is committed. The platform will never go beyond that on perpetuals -- "
+            "that is the 1x leverage cap, and it is the one limit with no setting.\n\n"
+            "High exposure is not the same as high risk if the positions are "
+            "unrelated, and it is not much better than one large bet if they are "
+            "not. That is what the correlated-exposure limit is for."
+        ),
+    },
+    {
+        "anchor": "concept-pnl",
+        "term": "Realised and unrealised P&L",
+        "short": "Money you have actually made, versus money you might still lose.",
+        "body": (
+            "P&L is profit and loss. It comes in two kinds and they are not "
+            "interchangeable.\n\n"
+            "Realised P&L is from positions you have closed. The trade is finished, "
+            "the money has moved, and nothing can take it back. This is the number "
+            "that tells you whether the platform is actually working.\n\n"
+            "Unrealised P&L is from positions you still hold, valued at what they "
+            "would fetch right now. It is a genuine estimate and it is not yours "
+            "yet: a position up 30 cents can be down 30 cents an hour later, and "
+            "the only way to convert one into the other is to close the position "
+            "and pay the spread and the fee to do it.\n\n"
+            "Daily-loss limits count realised losses, because a paper loss that "
+            "recovers by evening was never a loss. A drawdown limit watches equity "
+            "itself, which includes both."
+        ),
+    },
+    {
+        "anchor": "concept-position",
+        "term": "Position",
+        "short": "Contracts you currently hold and have not yet closed.",
+        "body": (
+            "A position is what you are left holding after a trade. Holding 20 YES "
+            "contracts on one market is one position of 20 contracts.\n\n"
+            "A position ends in one of two ways. You close it by selling, which "
+            "requires somebody willing to buy -- this is why the platform refuses "
+            "markets with too little depth, because a position you cannot close is "
+            "one that decides its own outcome. Or, for an event contract, it "
+            "settles: the question is answered and each contract pays $1.00 or "
+            "nothing, with no trading required.\n\n"
+            "Perpetuals never settle. They only end when you close them, which is "
+            "why they are the riskier of the two even at 1x leverage."
+        ),
+    },
+    {
+        "anchor": "concept-allocation",
+        "term": "Allocation",
+        "short": "How the account is split between domains and strategies.",
+        "body": (
+            "Allocation is how the money is divided up: how much sits behind event "
+            "contracts versus perpetuals, and how much each strategy may use.\n\n"
+            "The reason to split it at all is that concentration is the fastest way "
+            "to lose an account. A strategy given everything will occasionally be "
+            "confidently wrong with everything.\n\n"
+            "A strategy with nothing allocated to it is not disabled: it falls back "
+            "to its own configured ceiling, which is how a strategy is usable before "
+            "any allocation has been decided. On a small account these ceilings, not "
+            "the allocation, are usually what actually binds."
+        ),
+    },
 ]
 
 
