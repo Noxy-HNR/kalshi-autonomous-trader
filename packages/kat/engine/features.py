@@ -156,6 +156,7 @@ class FeatureWorker:
         self.unavailable = 0
         self.failures = 0
         self.last_cycle_markets = 0
+        self._last_plain: dict[str, dict[str, float]] = {}
 
     # -- observation ---------------------------------------------------------
 
@@ -241,6 +242,9 @@ class FeatureWorker:
         # last value it managed to compute.
         loop.features = plain
         loop.feature_vectors = vectors
+        # Kept for stats(): which feature names are warm is the question an
+        # operator actually has, and it cannot be answered from counts.
+        self._last_plain = plain
         self.last_cycle_markets = len(plain)
 
         if now_ms >= self._next_trim_ms:
@@ -298,6 +302,26 @@ class FeatureWorker:
         )
 
     def stats(self) -> dict[str, Any]:
+        """Counts, plus which features are actually warm.
+
+        The counts alone cannot answer the question people actually have. A
+        vector is published as soon as its *required* features compute, while
+        several optional ones -- realised volatility needs four consecutive
+        closed bars, an hour-long window needs an hour -- stay absent for a long
+        while afterwards, and are filtered out of what strategies see. So
+        "computed: 62, unavailable: 0" reads like everything is fine while every
+        strategy that wants volatility is still declining every market.
+
+        ``warm`` is therefore per feature: how many markets currently have a
+        value for it. A name sitting at zero is the reason a strategy is
+        skipping, and it is the difference between "still warming up" and
+        "broken".
+        """
+        warm: dict[str, int] = {}
+        for values in self._last_plain.values():
+            for name in values:
+                warm[name] = warm.get(name, 0) + 1
+        expected = [s.name for s in self.spec.specs]
         return {
             "market_type": self.market_type.value,
             "feature_set_id": self.spec.feature_set_id,
@@ -307,4 +331,6 @@ class FeatureWorker:
             "unavailable": self.unavailable,
             "failures": self.failures,
             "last_cycle_markets": self.last_cycle_markets,
+            "warm": dict(sorted(warm.items())),
+            "cold": sorted(name for name in expected if name not in warm),
         }

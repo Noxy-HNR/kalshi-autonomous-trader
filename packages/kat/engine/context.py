@@ -67,6 +67,11 @@ class EngineContext:
     news_pipeline: Any = None
     research_loop: Any = None
     portfolio_manager: Any = None
+    #: Feature workers by domain. Held so the dashboard can show warm-up
+    #: progress: several features need an hour of history before they compute at
+    #: all, and until they do the strategies that use them decline every market.
+    #: Without this, that is indistinguishable from a broken feature pipeline.
+    feature_workers: dict[MarketType, Any] = field(default_factory=dict)
 
     # -- status --------------------------------------------------------------
 
@@ -230,6 +235,14 @@ class EngineContext:
             # indistinguishable from "it is working": both look like a page that
             # loads on the machine it runs on.
             "remote_access": remote_access_status(),
+            # Warm-up progress. Several features need an hour of history before
+            # they produce anything, and the strategies that read them decline
+            # every market until they do -- which looks exactly like a broken
+            # pipeline unless the counts are visible.
+            "features": {
+                domain.value: worker.stats()
+                for domain, worker in self.feature_workers.items()
+            },
             "market_data": {
                 domain.value: state.stats(now_ms=now_ms)
                 for domain, state in self.market_states.items()

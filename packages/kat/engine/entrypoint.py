@@ -323,6 +323,7 @@ class Platform:
                 MarketType.PERP, self.context.market_states[MarketType.PERP], self.clock
             ),
         }
+        self.context.feature_workers = self.feature_workers
 
         # Inference serves whatever the registry has deployed, or nothing. A
         # model has no order authority: its output reaches a strategy as one

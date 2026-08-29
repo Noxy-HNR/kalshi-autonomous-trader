@@ -80,6 +80,18 @@ class OrderIntent:
     # exposure before treating it as a reduction.
     is_flatten: bool = False
 
+    #: Expected value of the round trip, **already net of expected costs**.
+    #:
+    #: The producer subtracts fees. ``kat.strategies.common`` builds this from
+    #: ``Costing.net_micros``, which is ``gross - fees`` over an entry *and* an
+    #: exit. A consumer must therefore compare it to a floor directly and must
+    #: not subtract fees again.
+    #:
+    #: The unit was previously undocumented, and the event risk engine took it
+    #: for a gross figure and subtracted an entry fee from it. That charged fees
+    #: twice -- once round-trip by the strategy, once more by the engine -- and
+    #: rejected trades whose real expected value was positive. Anything reading
+    #: this field is relying on the sentence above.
     expected_value_micros: int | None = None
     fair_value_cc: int | None = None
     confidence: float | None = None

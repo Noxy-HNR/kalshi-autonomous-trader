@@ -381,13 +381,22 @@ class EventRiskEngine:
                     )
 
             if intent.expected_value_micros is not None:
-                net_ev = intent.expected_value_micros - estimated_fees_micros
+                # Compared directly, not after subtracting fees again.
+                #
+                # OrderIntent.expected_value_micros is already net: the strategy
+                # builds it from Costing.net_micros, which is gross minus a
+                # *round-trip* fee. Subtracting this engine's entry-fee estimate
+                # on top charged the trade twice, and the second charge was not
+                # even the same quantity -- one leg against two. Marginal trades
+                # whose real expected value was positive were rejected, which is
+                # invisible in a log: a refusal looks identical either way.
+                net_ev = intent.expected_value_micros
                 ok = net_ev >= self.settings.min_expected_value_micros
                 checks.append(
                     CheckResult("min_expected_value", ok,
                                 limit=str(micros_to_decimal(self.settings.min_expected_value_micros)),
                                 observed=str(micros_to_decimal(net_ev)),
-                                detail="after estimated fees")
+                                detail="net of the round-trip fees the strategy costed")
                 )
                 if not ok:
                     return self._rejected(
