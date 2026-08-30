@@ -30,6 +30,7 @@ cycle, with subscriptions updated incrementally rather than torn down.
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from typing import Any
 
 from kat.common.enums import MarketType
@@ -433,11 +434,39 @@ def _levels(raw: Any) -> list[tuple[int, int]]:
 _LAST_DEFINITIONS: dict[str, dict[str, Any]] = {}
 
 
+#: How far out a market may settle and still be worth a subscription slot.
+#:
+#: The module has always said the watchlist is chosen by "liquidity and
+#: time-to-close" and only ever used liquidity. That gap put the 2028
+#: presidential nomination markets at the top of the list: genuinely the most
+#: traded contracts on the exchange, quoted a tenth of a cent wide, and almost
+#: perfectly still -- two of sixty watched markets repriced even four times in
+#: half an hour. A model learning from that has nothing to learn, and a strategy
+#: waiting for a dislocation waits forever.
+#:
+#: A year is deliberately loose. It excludes the multi-year political contracts
+#: without starving the watchlist: 2,911 markets inside a three-cent spread
+#: settle within a year, against 9 within a week.
+_WATCH_MAX_DAYS_TO_CLOSE = 365
+
 #: How wide a market may be quoted and still be worth a subscription slot.
 #: Deliberately looser than any strategy's own limit: this decides what is worth
 #: watching, not what is worth trading, and a market that drifts in and out of
 #: tradeable is exactly one to keep an eye on.
 _WATCH_MAX_SPREAD_CC = 1_000
+
+
+def _closes_within(market: Any, days: int) -> bool:
+    """Whether this market settles inside the horizon.
+
+    A market with no close time is kept: an unknown settlement date is not
+    evidence of a distant one, and dropping it would silently narrow the
+    watchlist on a schema change.
+    """
+    close = getattr(market, "close_time", None)
+    if close is None:
+        return True
+    return (close - datetime.now(UTC)).days <= days
 
 
 def _spread_cc(market: Any) -> int | None:
@@ -498,7 +527,13 @@ async def select_event_watchlist(
     # looser than any strategy's own limit -- this decides what is worth
     # watching, and a market drifting in and out of tradeable is worth watching
     # -- but it excludes the ones no strategy could ever act on.
-    quotable = [m for m in tradeable if _spread_cc(m) is not None and _spread_cc(m) <= _WATCH_MAX_SPREAD_CC]
+    quotable = [
+        m
+        for m in tradeable
+        if _spread_cc(m) is not None
+        and _spread_cc(m) <= _WATCH_MAX_SPREAD_CC
+        and _closes_within(m, _WATCH_MAX_DAYS_TO_CLOSE)
+    ]
     if not quotable:
         # Never widen silently: an empty watchlist is a fact worth logging, and
         # falling back to the unfiltered list would hide the exchange being shut.
