@@ -20,7 +20,6 @@ import pytest
 
 from kat.models.trainers import Fold, walk_forward, walk_forward_folds
 
-
 # -- geometry ----------------------------------------------------------------
 
 
@@ -91,7 +90,7 @@ def _separable(n: int, seed: int = 0) -> tuple[np.ndarray, np.ndarray, np.ndarra
 
 def test_a_stationary_signal_scores_above_chance_in_every_window() -> None:
     X, y, ts = _separable(3_000)
-    summary, folds = walk_forward("logistic", X, y, ["a", "b", "c", "d"], timestamps=ts, folds=4)
+    summary, _ = walk_forward("logistic", X, y, ["a", "b", "c", "d"], timestamps=ts, folds=4)
     assert summary["scored"] == summary["folds"] == 4
     assert summary["mean_test_auc"] > 0.75
     assert summary["worst_test_auc"] > 0.6, "a stationary signal should hold up in every window"
