@@ -82,6 +82,8 @@ export interface CycleResult {
 }
 
 export interface Overview {
+  equity_is_simulated?: boolean;
+  domains_available?: string[];
   environment: string;
   operating_mode: string;
   live_armed: boolean;

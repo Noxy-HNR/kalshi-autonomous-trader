@@ -46,7 +46,11 @@ export default function PortfolioPage() {
   );
 
   const eventEquity = Number(data?.event.equity_usd ?? 0);
-  const perpEquity = Number(data?.perp.equity_usd ?? 0);
+  const perpAvailable = (data?.domains_available ?? []).includes("perp");
+  // A domain with no account state cannot hold or lose anything, and summing a
+  // seeded placeholder for it reported $400 of equity on a machine with no
+  // perpetual credentials at all.
+  const perpEquity = perpAvailable ? Number(data?.perp.equity_usd ?? 0) : 0;
   const eventExposure = Number(data?.event.exposure_usd ?? 0);
   const perpExposure = Number(data?.perp.exposure_usd ?? 0);
   const eventPnl = Number(data?.event.realized_pnl_today_usd ?? 0);
@@ -81,6 +85,15 @@ export default function PortfolioPage() {
 
       {data ? (
         <>
+          {data.equity_is_simulated ? (
+            <div className="note" style={{ marginBottom: 14 }}>
+              <strong>These are simulated balances.</strong> The platform is in{" "}
+              <code className="mono">{data.environment}</code> mode: prices below are
+              real, the money is not. Equity starts from a configured amount
+              (<code className="mono">KAT_PAPER_STARTING_BALANCE_USD</code>) rather than
+              from a Kalshi account, and no order can reach the exchange.
+            </div>
+          ) : null}
           <div className="grid g4">
             <Stat
               label="Total equity"

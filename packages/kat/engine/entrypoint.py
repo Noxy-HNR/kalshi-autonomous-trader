@@ -31,6 +31,7 @@ from typing import Any
 from kat.arbitrage.scanner import ArbitrageScanner, opportunity_to_intents
 from kat.common.enums import MarketType, StrategyState, TradingEnvironment
 from kat.common.errors import ConfigError
+from kat.common.fixedpoint import parse_dollars_micros
 from kat.common.timeutil import SystemClock
 from kat.config.settings import AppSettings, get_settings
 from kat.engine.context import EngineContext, set_context
@@ -304,18 +305,25 @@ class Platform:
 
         # Paper mode has no exchange account, so seed a starting balance from
         # config rather than leaving the loop with no state to size against.
+        #
+        # Only the domains that can actually trade. Seeding perpetuals on a
+        # machine with no perpetual credentials put $200 of imaginary equity
+        # behind a domain that could not place an order, and the dashboard
+        # summed it into a $400 total on a sub-$250 account.
         if environment is TradingEnvironment.PAPER:
             now_ms = self.clock.now_ms()
+            seed_micros = parse_dollars_micros(settings.paper_starting_balance_usd)
             event_loop.account_state = EventAccountState(
-                balance_micros=200_000_000, updated_at_ms=now_ms
+                balance_micros=seed_micros, updated_at_ms=now_ms
             )
             event_loop.account_state.peak_equity_micros = event_loop.account_state.equity_micros
-            perp_loop.account_state = PerpAccountState(
-                equity_micros=200_000_000,
-                equity_source="paper_seed",
-                equity_is_known=True,
-                updated_at_ms=now_ms,
-            )
+            if self.perps_enabled:
+                perp_loop.account_state = PerpAccountState(
+                    equity_micros=seed_micros,
+                    equity_source="paper_seed",
+                    equity_is_known=True,
+                    updated_at_ms=now_ms,
+                )
 
         # Register the shipped strategies at PAPER: they trade with simulated
         # fills against live market data, which is the lowest rung that produces

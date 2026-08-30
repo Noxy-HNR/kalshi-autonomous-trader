@@ -30,7 +30,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from kat.common.enums import KillSwitchScope, MarketType, OperatingMode
+from kat.common.enums import (
+    KillSwitchScope,
+    MarketType,
+    OperatingMode,
+    TradingEnvironment,
+)
 from kat.common.fixedpoint import micros_to_decimal
 from kat.net.tailscale import remote_access_status
 from kat.observability.logging import get_logger
@@ -88,6 +93,18 @@ class EngineContext:
             "trading_permitted": self.app.trading_permitted if self.app else False,
             "phase": self.app.phase.value if self.app else "unknown",
             "total_equity_usd": str(micros_to_decimal(total_equity)),
+            # Whether that number is money or a placeholder. In PAPER the equity
+            # is a configured seed, and a dashboard showing it unlabelled next to
+            # live production prices reads as an account balance -- which it is
+            # not. The page needs to be able to say so.
+            "equity_is_simulated": self.app.settings.environment is not TradingEnvironment.LIVE
+            if self.app
+            else True,
+            "domains_available": [
+                domain.value
+                for domain, loop in self.loops.items()
+                if loop.account_state is not None
+            ],
             "event": event,
             "perp": perp,
             "health": self.health(),

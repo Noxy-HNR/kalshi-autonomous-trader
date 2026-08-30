@@ -422,6 +422,14 @@ class AppSettings(BaseSettings):
     live_trading_armed: bool = False
 
     # -- host / process ------------------------------------------------------
+    # What a PAPER run pretends the account holds, per domain.
+    #
+    # Hardcoded at $200 until now, and seeded into *both* domains unconditionally,
+    # so the dashboard reported $400 of total equity on a machine with no
+    # perpetual credentials at all -- half of it backing a domain that could not
+    # trade. On a sub-$250 account that is not a rounding error, it is double.
+    paper_starting_balance_usd: Decimal = Field(default=Decimal("200"), gt=0, le=1_000_000)
+
     api_host: str = "127.0.0.1"
     api_port: int = Field(default=8000, ge=1, le=65_535)
     # How the dashboard is reachable from another device.
