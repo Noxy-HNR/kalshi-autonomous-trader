@@ -30,10 +30,13 @@ log = get_logger(__name__)
 
 __all__ = [
     "TRAINERS",
+    "Fold",
     "SplitResult",
     "TrainedModel",
     "temporal_split",
     "train_all",
+    "walk_forward",
+    "walk_forward_folds",
 ]
 
 
@@ -379,3 +382,189 @@ def train_all(
         failed=[m.name for m in models if m.failed],
     )
     return models
+
+
+# ---------------------------------------------------------------------------
+# Walk-forward
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class Fold:
+    """One rolling window's out-of-sample result for one family."""
+
+    index: int
+    train_rows: int
+    test_rows: int
+    train_base_rate: float
+    test_base_rate: float
+    train_auc: float | None
+    test_auc: float | None
+    test_brier: float
+    test_excess_ece: float
+    failed: str | None = None
+
+    @property
+    def gap(self) -> float | None:
+        """Train AUC minus test AUC for this window alone."""
+        if self.train_auc is None or self.test_auc is None:
+            return None
+        return self.train_auc - self.test_auc
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "index": self.index,
+            "train_rows": self.train_rows,
+            "test_rows": self.test_rows,
+            "train_base_rate": round(self.train_base_rate, 4),
+            "test_base_rate": round(self.test_base_rate, 4),
+            "train_auc": None if self.train_auc is None else round(self.train_auc, 4),
+            "test_auc": None if self.test_auc is None else round(self.test_auc, 4),
+            "test_brier": round(self.test_brier, 4),
+            "test_excess_ece": round(self.test_excess_ece, 4),
+            "gap": None if self.gap is None else round(self.gap, 4),
+            "failed": self.failed,
+        }
+
+
+def walk_forward_folds(
+    n_rows: int, *, folds: int = 5, train_fraction: float = 0.6
+) -> list[tuple[slice, slice]]:
+    """Rolling train/test index pairs over time-ordered rows.
+
+    Rolling, not expanding. An expanding window lets the earliest data influence
+    every later result, so a model that only worked in the first period keeps
+    being propped up by it -- the same reasoning the backtest walk-forward gives
+    for advancing its windows rather than growing them.
+
+    The leading ``train_fraction`` of the rows is training only and never
+    tested: without that reservation the first window would score a model that
+    had seen almost nothing, which is not an out-of-sample result but an
+    untrained one. Test spans then tile the remainder exactly once, so no row is
+    scored twice.
+    """
+    if folds < 2:
+        raise ValueError("a walk-forward with fewer than two folds measures nothing")
+    if not 0.0 < train_fraction < 1.0:
+        raise ValueError("train_fraction must sit strictly between 0 and 1")
+
+    reserved = int(n_rows * train_fraction)
+    test_region = n_rows - reserved
+    if test_region < folds:
+        return []
+
+    step = test_region / folds
+    train_span = int(step * train_fraction / (1.0 - train_fraction))
+    pairs: list[tuple[slice, slice]] = []
+    for index in range(folds):
+        test_start = reserved + int(step * index)
+        test_end = reserved + int(step * (index + 1)) if index < folds - 1 else n_rows
+        train_start = max(0, test_start - train_span)
+        if test_end - test_start < 1 or test_start - train_start < 1:
+            continue
+        pairs.append((slice(train_start, test_start), slice(test_start, test_end)))
+    return pairs
+
+
+def walk_forward(
+    name: str,
+    X: np.ndarray,
+    y: np.ndarray,
+    feature_names: list[str],
+    *,
+    timestamps: np.ndarray | None = None,
+    folds: int = 5,
+    train_fraction: float = 0.6,
+    **hyperparameters: Any,
+) -> tuple[dict[str, Any], list[Fold]]:
+    """Score one family across rolling windows instead of one split.
+
+    A single 60/20/20 temporal split bets everything on one test period. On
+    market data that is a coin toss about regime: the platform's first attempt
+    produced base rates of 7.6%, 10.9% and 35.9% across its three splits, so
+    every model was judged on conditions it had never trained on, and the
+    train-to-test AUC gap could not distinguish memorisation from a market that
+    had simply changed.
+
+    Rolling windows separate those two. A gap that is large in every window is
+    the model memorising; a gap that swings between windows is the market
+    moving, and ``gap_spread`` is what tells them apart.
+
+    Returns ``(summary, per_fold_detail)``.
+    """
+    X = np.asarray(X)
+    y = np.asarray(y)
+    if timestamps is not None:
+        order = np.argsort(np.asarray(timestamps), kind="stable")
+        X, y = X[order], y[order]
+
+    pairs = walk_forward_folds(X.shape[0], folds=folds, train_fraction=train_fraction)
+    if not pairs:
+        return {"family": name, "folds": 0, "reason": "not enough rows to roll a window"}, []
+
+    builder = TRAINERS.get(name)
+    if builder is None:
+        raise ValueError(f"unknown model family {name!r}; known: {sorted(TRAINERS)}")
+
+    results: list[Fold] = []
+    for index, (train_idx, test_idx) in enumerate(pairs):
+        X_tr, y_tr = X[train_idx], y[train_idx]
+        X_te, y_te = X[test_idx], y[test_idx]
+        fold = Fold(
+            index=index,
+            train_rows=int(y_tr.size),
+            test_rows=int(y_te.size),
+            train_base_rate=float(np.mean(y_tr)) if y_tr.size else float("nan"),
+            test_base_rate=float(np.mean(y_te)) if y_te.size else float("nan"),
+            train_auc=None,
+            test_auc=None,
+            test_brier=float("nan"),
+            test_excess_ece=float("nan"),
+        )
+        # A fold whose training half is one class cannot be fitted, and one whose
+        # test half is one class cannot be ranked. Both are recorded rather than
+        # skipped: a walk-forward that quietly drops its hard windows is
+        # reporting on the easy ones.
+        if len(np.unique(y_tr)) < 2:
+            fold.failed = "training window is one class"
+            results.append(fold)
+            continue
+        try:
+            estimator, _ = builder(**hyperparameters)
+            estimator.fit(X_tr, y_tr)
+            train_metrics = _metrics(y_tr, estimator.predict_proba(X_tr)[:, 1])
+            test_metrics = _metrics(y_te, estimator.predict_proba(X_te)[:, 1])
+        except Exception as exc:
+            fold.failed = f"{type(exc).__name__}: {exc}"
+            results.append(fold)
+            continue
+
+        fold.train_auc = train_metrics.get("auc")
+        fold.test_auc = test_metrics.get("auc")
+        fold.test_brier = test_metrics.get("brier", float("nan"))
+        fold.test_excess_ece = test_metrics.get("excess_ece", float("nan"))
+        results.append(fold)
+
+    scored = [f for f in results if f.test_auc is not None]
+    gaps = [f.gap for f in results if f.gap is not None]
+    aucs = [f.test_auc for f in scored]
+    rates = [f.test_base_rate for f in results if f.test_base_rate == f.test_base_rate]
+
+    summary: dict[str, Any] = {
+        "family": name,
+        "folds": len(results),
+        "scored": len(scored),
+        "failed": sum(1 for f in results if f.failed),
+        "mean_test_auc": float(np.mean(aucs)) if aucs else None,
+        "worst_test_auc": float(np.min(aucs)) if aucs else None,
+        "mean_gap": float(np.mean(gaps)) if gaps else None,
+        # The number this whole function exists to produce. A consistent gap is
+        # a model that memorises; a gap that swings is a market that moved.
+        "gap_spread": float(np.max(gaps) - np.min(gaps)) if len(gaps) > 1 else None,
+        "base_rate_spread": float(np.max(rates) - np.min(rates)) if len(rates) > 1 else None,
+        "mean_excess_ece": (
+            float(np.mean([f.test_excess_ece for f in scored])) if scored else None
+        ),
+    }
+    log.info("model.walk_forward", **{k: v for k, v in summary.items() if v is not None})
+    return summary, results

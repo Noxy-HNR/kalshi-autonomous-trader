@@ -316,6 +316,78 @@ def _report(models: list[Any]) -> None:
         )
 
 
+def _report_walk_forward(dataset: Any, *, folds: int) -> None:
+    """Score every family across rolling windows and say what the gap means.
+
+    The single split reports one number for the train-to-test gap and cannot say
+    where it came from. This runs the same families over rolling windows and
+    reports the gap's *spread*, which is the part that distinguishes the two
+    explanations:
+
+    * a large gap in every window is the model memorising its training data --
+      more data will not fix that, a simpler model might;
+    * a gap that swings between windows is the market changing underneath it,
+      and the single split simply landed on an unlucky period.
+
+    The base-rate spread is printed beside it because that is the mechanism: if
+    the fraction of positive labels moves between windows, the model is being
+    asked a different question in each one.
+    """
+    from kat.models.trainers import TRAINERS, walk_forward
+
+    print()
+    print(f"  walk-forward, {folds} rolling windows")
+    print(f"  {'family':<16}{'mean AUC':>10}{'worst':>8}{'mean gap':>10}{'gap spread':>12}{'scored':>8}")
+
+    verdicts: list[tuple[str, float | None, float | None]] = []
+    for name in TRAINERS:
+        summary, fold_results = walk_forward(
+            name,
+            dataset.X,
+            dataset.y,
+            list(dataset.feature_names),
+            timestamps=dataset.as_of_ms,
+            folds=folds,
+        )
+        if not summary.get("folds"):
+            print(f"  {name:<16}{summary.get('reason', 'no folds')}")
+            continue
+
+        def _fmt(value: float | None, places: int = 4) -> str:
+            return "n/a" if value is None else f"{value:.{places}f}"
+
+        print(
+            f"  {name:<16}{_fmt(summary['mean_test_auc']):>10}"
+            f"{_fmt(summary['worst_test_auc'], 3):>8}"
+            f"{_fmt(summary['mean_gap']):>10}"
+            f"{_fmt(summary['gap_spread']):>12}"
+            f"{summary['scored']}/{summary['folds']:>3}"
+        )
+        verdicts.append((name, summary.get("mean_gap"), summary.get("gap_spread")))
+        for fold in fold_results:
+            if fold.failed:
+                print(f"      fold {fold.index}: {fold.failed}")
+
+    rates = [f for f in (verdicts or []) if f[2] is not None]
+    if not rates:
+        return
+    widest = max(rates, key=lambda v: v[2] or 0.0)
+    _, mean_gap, spread = widest
+    print()
+    if spread is not None and mean_gap is not None and spread > mean_gap:
+        print(
+            "  The gap varies more between windows than its own average, so the "
+            "single split was measuring the market changing rather than the model "
+            "memorising. More data across more regimes is the fix; a simpler model "
+            "is not."
+        )
+    else:
+        print(
+            "  The gap is consistent across windows, so it is the model memorising "
+            "rather than the market moving. More data will not fix that -- fewer "
+            "features or firmer regularisation might."
+        )
+
 async def main() -> int:
     parser = argparse.ArgumentParser(description="Train and optionally deploy a model.")
     parser.add_argument("--hours", type=int, default=96, help="how much history to use")
@@ -330,6 +402,15 @@ async def main() -> int:
     )
     parser.add_argument("--step-min", type=int, default=1, help="minutes between decision times")
     parser.add_argument("--deploy", action="store_true", help="deploy if it clears the gates")
+    parser.add_argument(
+        "--no-walk-forward",
+        dest="walk_forward",
+        action="store_false",
+        help="skip the rolling-window diagnostic. It costs one extra fit per "
+             "family per fold and is what explains a gate failure, so it is on "
+             "by default.",
+    )
+    parser.add_argument("--folds", type=int, default=5, help="rolling windows")
     args = parser.parse_args()
 
     configure_logging("WARNING")
@@ -375,6 +456,9 @@ async def main() -> int:
 
     models = train_all(split, list(dataset.feature_names))
     _report(models)
+
+    if args.walk_forward:
+        _report_walk_forward(dataset, folds=args.folds)
 
     trained = [m for m in models if m.failed is None]
     if not trained:
