@@ -5,12 +5,19 @@ the commands to run when you want the platform to survive a reboot.
 
 The application handles its own start-up, shutdown, reconnection, health checks,
 recovery and graceful termination. Neither entry below supervises it beyond
-restarting the process if it exits.
+restarting the process if it exits -- but both do restart it, which is the part
+that matters after an unattended crash.
 
-## Windows (scheduled task, runs at logon)
+## Windows (scheduled task, runs at logon, restarts on failure)
+
+Registered from `kat-task.xml` rather than from `schtasks` switches, because
+restart-on-failure cannot be expressed as a switch and three of the task
+engine's defaults would otherwise stop a long-running process: it halts tasks
+after three days, stops them when the machine goes on battery, and stops them
+when the machine stops being idle. The XML overrides all four.
 
 ```
-schtasks /Create /TN "KalshiAutonomousTrader" /SC ONLOGON /RL LIMITED /F /TR "\"C:\AI\projects\kalshi-autonomous-trader\.venv\Scripts\python.exe\" -m kat.engine.entrypoint" /WD "C:\AI\projects\kalshi-autonomous-trader"
+schtasks /Create /TN "KalshiAutonomousTrader" /XML "C:\AI\projects\kalshi-autonomous-trader\deploy\kat-task.xml" /F
 ```
 
 To remove it:
@@ -21,6 +28,34 @@ schtasks /Delete /TN "KalshiAutonomousTrader" /F
 
 Runs at LIMITED integrity: the platform needs no elevation, and running a
 trading process as Administrator enlarges the blast radius for no benefit.
+
+## Weekly retrain (optional, Windows)
+
+Trains a model from banked quotes every Sunday at 03:00, scores it against the
+selection gates, and records the outcome. It **never deploys**: the winner is
+registered as a candidate and promoting it stays a decision you make after
+reading the report.
+
+```
+schtasks /Create /TN "KalshiAutonomousTraderRetrain" /XML "C:\AI\projects\kalshi-autonomous-trader\deploy\kat-retrain-task.xml" /F
+```
+
+Where the report lands:
+
+- **Audit log** -> Control actions. One `model_retrained` entry per run, whether
+  a model cleared the gates or nothing did. A run that failed every gate is the
+  commonest outcome and the one most worth seeing.
+- **Models page** -> the registered candidate with its train/validation/test
+  metrics, if one cleared.
+
+Restart-on-failure is deliberately off for this task. A retrain that crashes is
+a late report; retrying it every minute all night is not an improvement.
+
+To remove it:
+
+```
+schtasks /Delete /TN "KalshiAutonomousTraderRetrain" /F
+```
 
 ## Linux (systemd)
 
@@ -46,9 +81,6 @@ real orders require **both** `KAT_ENVIRONMENT=live` and
 A restart comes back in exactly that state.
 
 ## Verifying it came back up
-
-The port is whatever `KAT_API_PORT` is set to in `.env` (8020 on this machine,
-8000 by default).
 
 ```
 curl -s http://127.0.0.1:8020/api/health

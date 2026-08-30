@@ -225,6 +225,72 @@ async def load_histories(hours: int, limit_markets: int) -> dict[str, MarketHist
     return histories
 
 
+async def _record_run(
+    database: Any,
+    args: Any,
+    dataset: Any,
+    result: Any,
+    *,
+    registered: Any | None,
+) -> None:
+    """Leave a durable trace of this run, whatever it concluded.
+
+    Written straight into a session rather than through :class:`AsyncWriter`.
+    The writer is a long-lived background task that flushes on an interval; a
+    process that exits seconds later would drop the row it was asked to persist,
+    which is the one thing this must not do.
+
+    The audit page renders ``detail`` as ``JSON.stringify(...).slice(0, 160)``
+    with no expansion and no tooltip, and Postgres stores JSONB with its own key
+    order -- so writing the important keys first does not keep them visible. The
+    only thing that works is keeping the whole object under that budget, which
+    is why this is four short keys and a truncated reason rather than everything
+    the run knows. The full picture is in the Models page and in stdout.
+    """
+    from kat.db.models import AuditLog
+
+    candidates = getattr(result, "candidates", []) or []
+    if registered is not None:
+        outcome = "deployed" if args.deploy else "registered"
+        subject = registered.model_id
+        # A retrain that changed what the platform will do is worth a colour.
+        severity = "warning" if args.deploy else "info"
+        detail: dict[str, Any] = {
+            "out": outcome,
+            "fam": result.best.name,
+            "auc": round(result.best.test_metrics.get("auc", float("nan")), 3),
+            "rows": dataset.n_rows,
+        }
+    else:
+        outcome = "gates_refused"
+        subject = "none"
+        severity = "info"
+        # The gate that stopped the best-scoring candidate, not all of them:
+        # four families times three failures each does not fit in the budget,
+        # and the first one is what tells you what to change.
+        best = max(candidates, key=lambda c: c.score, default=None)
+        reason = (best.failures[0] if best and best.failures else result.reason) or ""
+        detail = {
+            "out": outcome,
+            "why": reason.split(" (")[0][:74],
+            "rows": dataset.n_rows,
+            "n": len(candidates),
+        }
+
+    async with database.session() as session:
+        session.add(
+            AuditLog(
+                actor="retrain",
+                action="model_retrained",
+                subject=subject[:128],
+                detail=detail,
+                severity=severity,
+                environment=AppSettings().environment.value,
+            )
+        )
+    print(f"  recorded: audit entry model_retrained ({outcome})")
+
+
 def _balance(y: Any) -> str:
     n = len(y)
     if not n:
@@ -328,19 +394,28 @@ async def main() -> int:
         why = "" if candidate.passed else "  <- " + "; ".join(candidate.failures)
         print(f"    {candidate.model.name:<16}{mark}  score={candidate.score:.4f}{why}")
 
-    if result.best is None:
-        print("\n  NOTHING DEPLOYED: no family cleared the gates.", file=sys.stderr)
-        print(f"  {result.reason}", file=sys.stderr)
-        return 2
-
-    winner = result.best
-    print(f"\n  winner: {winner.name}")
-    print(f"    validation: {winner.validation_metrics}")
-    print(f"    test:       {winner.test_metrics}")
-
-    database = get_database(AppSettings())
+    # The database is opened before the outcome is known, on purpose.
+    #
+    # This used to return early when every family failed its gates, before the
+    # connection was made, so the most likely outcome of an unattended retrain
+    # left no record anywhere. The Models page would show "No models registered
+    # yet" -- which is exactly what it shows when nothing ever ran. A scheduled
+    # job whose commonest result is indistinguishable from not having run is not
+    # reporting anything.
+    database = get_database()
     await database.connect()
     try:
+        if result.best is None:
+            print("\n  NOTHING DEPLOYED: no family cleared the gates.", file=sys.stderr)
+            print(f"  {result.reason}", file=sys.stderr)
+            await _record_run(database, args, dataset, result, registered=None)
+            return 2
+
+        winner = result.best
+        print(f"\n  winner: {winner.name}")
+        print(f"    validation: {winner.validation_metrics}")
+        print(f"    test:       {winner.test_metrics}")
+
         registry = ModelRegistry(database)
         registered = await registry.register(
             winner,
@@ -357,6 +432,7 @@ async def main() -> int:
             print("  restart the engine to pick it up.")
         else:
             print("  not deployed. Re-run with --deploy when you want it live.")
+        await _record_run(database, args, dataset, result, registered=registered)
     finally:
         await database.disconnect()
     return 0

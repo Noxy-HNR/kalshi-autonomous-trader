@@ -49,6 +49,44 @@ __all__ = [
 
 TASK_NAME = "KalshiAutonomousTrader"
 
+#: The weekly retrain. A separate task rather than a thread inside the engine:
+#: training pins a core for minutes and holds the whole dataset in memory, and
+#: doing that inside the process that is holding the order book is how a
+#: websocket falls behind. It also means a crashed retrain cannot take the
+#: trading engine down with it.
+RETRAIN_TASK_NAME = "KalshiAutonomousTraderRetrain"
+
+_RESTART_ON_FAILURE = """    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>999</Count>
+    </RestartOnFailure>"""
+
+
+def _logon_trigger(account: str) -> str:
+    return f"""    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>{account}</UserId>
+    </LogonTrigger>"""
+
+
+def _weekly_trigger(day: str = "Sunday", at: str = "03:00:00") -> str:
+    """A weekly calendar trigger.
+
+    ``StartBoundary`` is required and is interpreted in local time. The date
+    part only has to be in the past for the schedule to be active, so a fixed
+    historical Sunday is used rather than "today" -- generating this file twice
+    should produce the same bytes, and a date that moved would make every
+    regeneration look like a change.
+    """
+    return f"""    <CalendarTrigger>
+      <Enabled>true</Enabled>
+      <StartBoundary>2024-01-07T{at}</StartBoundary>
+      <ScheduleByWeek>
+        <DaysOfWeek><{day} /></DaysOfWeek>
+        <WeeksInterval>1</WeeksInterval>
+      </ScheduleByWeek>
+    </CalendarTrigger>"""
+
 
 def _python_executable() -> str:
     """The interpreter that should run the service.
@@ -64,7 +102,16 @@ def _python_executable() -> str:
     return sys.executable
 
 
-def windows_task_xml(user: str | None = None) -> str:
+def windows_task_xml(
+    user: str | None = None,
+    *,
+    task_name: str = TASK_NAME,
+    module: str = "kat.engine.entrypoint",
+    arguments: str = "",
+    triggers: str | None = None,
+    description: str | None = None,
+    restart_on_failure: bool = True,
+) -> str:
     """A Scheduled Task definition that survives the ways Windows kills daemons.
 
     Registered from XML rather than from ``schtasks`` switches because the four
@@ -97,17 +144,26 @@ def windows_task_xml(user: str | None = None) -> str:
     """
     python = _python_executable()
     account = user or _current_user()
+    triggers = triggers if triggers is not None else _logon_trigger(account)
+    description = description or (
+        "Kalshi Autonomous Trader. Restarts on failure; never arms live trading by itself."
+    )
+    # A one-shot job must not be restarted on failure. A retrain that crashes is
+    # something to read about in the morning, not something to retry every
+    # minute until it succeeds or the week ends.
+    restart_block = (
+        _RESTART_ON_FAILURE
+        if restart_on_failure
+        else "    <!-- one-shot: a failed run is reported, not retried -->"
+    )
     return f"""<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.3" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
-    <Description>Kalshi Autonomous Trader. Restarts on failure; never arms live trading by itself.</Description>
-    <URI>\\{TASK_NAME}</URI>
+    <Description>{description}</Description>
+    <URI>\\{task_name}</URI>
   </RegistrationInfo>
   <Triggers>
-    <LogonTrigger>
-      <Enabled>true</Enabled>
-      <UserId>{account}</UserId>
-    </LogonTrigger>
+{triggers}
   </Triggers>
   <Principals>
     <Principal id="Author">
@@ -134,15 +190,12 @@ def windows_task_xml(user: str | None = None) -> str:
     <WakeToRun>false</WakeToRun>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
     <Priority>5</Priority>
-    <RestartOnFailure>
-      <Interval>PT1M</Interval>
-      <Count>999</Count>
-    </RestartOnFailure>
+{restart_block}
   </Settings>
   <Actions Context="Author">
     <Exec>
       <Command>{python}</Command>
-      <Arguments>-m kat.engine.entrypoint</Arguments>
+      <Arguments>-m {module}{arguments}</Arguments>
       <WorkingDirectory>{REPO_ROOT}</WorkingDirectory>
     </Exec>
   </Actions>
@@ -150,10 +203,36 @@ def windows_task_xml(user: str | None = None) -> str:
 """
 
 
-def windows_task_command(xml_path: Path | None = None) -> str:
-    """The ``schtasks`` command that registers the task from its XML definition."""
+def retrain_task_xml(user: str | None = None, *, day: str = "Sunday", at: str = "03:00:00") -> str:
+    """A weekly retrain that trains, reports, and never deploys.
+
+    The absence of ``--deploy`` is the whole design. ``scripts/train_model.py``
+    registers a winner as a *candidate* and deploys nothing unless asked, so an
+    unattended run can change what the dashboard shows and what the audit log
+    records, and cannot change what the platform trades. Promotion stays a thing
+    a person does after reading the gate report.
+
+    Restart-on-failure is off for the same reason it is on for the engine: the
+    engine dying means positions are unwatched, while a retrain dying means a
+    report is late.
+    """
+    return windows_task_xml(
+        user,
+        task_name=RETRAIN_TASK_NAME,
+        module="scripts.train_model",
+        description=(
+            "Kalshi Autonomous Trader weekly retrain. Trains, scores against the "
+            "selection gates, and records the outcome. Never deploys."
+        ),
+        triggers=_weekly_trigger(day=day, at=at),
+        restart_on_failure=False,
+    )
+
+
+def windows_task_command(xml_path: Path | None = None, *, task_name: str = TASK_NAME) -> str:
+    """The ``schtasks`` command that registers a task from its XML definition."""
     path = xml_path or (REPO_ROOT / "deploy" / "kat-task.xml")
-    return f'schtasks /Create /TN "{TASK_NAME}" /XML "{path}" /F'
+    return f'schtasks /Create /TN "{task_name}" /XML "{path}" /F'
 
 
 def _current_user() -> str:
@@ -228,8 +307,13 @@ def write_service_files(output_dir: Path | None = None) -> dict[str, Path]:
     task_path = target / "kat-task.xml"
     task_path.write_text(windows_task_xml(), encoding="utf-16")
 
+    retrain_path = target / "kat-retrain-task.xml"
+    retrain_path.write_text(retrain_task_xml(), encoding="utf-16")
+
     readme = target / "README.md"
     settings = get_settings()
+    retrain_command = windows_task_command(retrain_path, task_name=RETRAIN_TASK_NAME)
+    retrain_delete = f'schtasks /Delete /TN "{RETRAIN_TASK_NAME}" /F'
     readme.write_text(
         f"""# Running the platform continuously
 
@@ -261,6 +345,34 @@ To remove it:
 
 Runs at LIMITED integrity: the platform needs no elevation, and running a
 trading process as Administrator enlarges the blast radius for no benefit.
+
+## Weekly retrain (optional, Windows)
+
+Trains a model from banked quotes every Sunday at 03:00, scores it against the
+selection gates, and records the outcome. It **never deploys**: the winner is
+registered as a candidate and promoting it stays a decision you make after
+reading the report.
+
+```
+{retrain_command}
+```
+
+Where the report lands:
+
+- **Audit log** -> Control actions. One `model_retrained` entry per run, whether
+  a model cleared the gates or nothing did. A run that failed every gate is the
+  commonest outcome and the one most worth seeing.
+- **Models page** -> the registered candidate with its train/validation/test
+  metrics, if one cleared.
+
+Restart-on-failure is deliberately off for this task. A retrain that crashes is
+a late report; retrying it every minute all night is not an improvement.
+
+To remove it:
+
+```
+{retrain_delete}
+```
 
 ## Linux (systemd)
 
@@ -298,18 +410,28 @@ resumes anyway.
 """,
         encoding="utf-8",
     )
-    return {"unit": unit_path, "task": task_path, "readme": readme}
+    return {
+        "unit": unit_path,
+        "task": task_path,
+        "retrain": retrain_path,
+        "readme": readme,
+    }
 
 
 def main() -> None:
     """Print what would be installed, and write the unit file."""
     paths = write_service_files()
-    print(f"Wrote {paths['unit']}")
-    print(f"Wrote {paths['readme']}")
+    for key in ("unit", "task", "retrain", "readme"):
+        print(f"Wrote {paths[key]}")
     print()
     if sys.platform == "win32":
         print("To start at logon on this machine, run:")
-        print(f"  {windows_task_command()}")
+        print(f"  {windows_task_command(paths['task'])}")
+        print()
+        print("To retrain weekly (trains and reports; never deploys):")
+        print(
+            f"  {windows_task_command(paths['retrain'], task_name=RETRAIN_TASK_NAME)}"
+        )
         if shutil.which("schtasks") is None:
             print("  (schtasks was not found on PATH)")
     else:
