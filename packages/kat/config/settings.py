@@ -422,6 +422,15 @@ class AppSettings(BaseSettings):
     live_trading_armed: bool = False
 
     # -- host / process ------------------------------------------------------
+    # How often the watchlist is re-chosen.
+    #
+    # Long enough that a market gets a fair hearing -- judged on whether it moved
+    # at all in the interval, thirty minutes is generous for anything liquid --
+    # and short enough that settled markets do not hold a subscription slot for
+    # the life of the process, which is what happened when there was no refresh
+    # at all.
+    watchlist_refresh_s: float = Field(default=1_800.0, ge=60.0, le=86_400.0)
+
     # What a PAPER run pretends the account holds, per domain.
     #
     # Hardcoded at $200 until now, and seeded into *both* domains unconditionally,

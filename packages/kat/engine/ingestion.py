@@ -82,6 +82,9 @@ class MarketDataIngestor:
         self._last_quote: dict[str, tuple] = {}
         self.quotes_persisted = 0
         self.quotes_unchanged = 0
+        #: Top-of-book changes seen per ticker since the last watchlist refresh.
+        #: Reset by :meth:`take_movement`, which the refresh consults.
+        self.quote_changes: dict[str, int] = {}
         self.definitions_attached = 0
         self.snapshots_applied = 0
         self._register_handlers()
@@ -173,6 +176,17 @@ class MarketDataIngestor:
                 "ingestion.watchlist_updated",
                 domain=self.market_type.value, added=len(added), removed=len(removed),
             )
+
+    def take_movement(self) -> dict[str, int]:
+        """Top-of-book changes per ticker since the last call, and reset.
+
+        Consumed rather than read so each refresh judges the interval it just
+        lived through. A cumulative count would let a market that was busy this
+        morning hold its slot all evening, which is the behaviour being fixed.
+        """
+        movement = self.quote_changes
+        self.quote_changes = {}
+        return movement
 
     def healthy(self) -> bool:
         return self.ws.connected
@@ -369,6 +383,13 @@ class MarketDataIngestor:
             return
         self._last_quote[ticker] = fingerprint
         self.quotes_persisted += 1
+        # The dedup above is already deciding "did this market actually move",
+        # once per message, and then throwing the answer away per ticker. Keeping
+        # it is free and is the only first-hand evidence the platform has about
+        # which of its subscriptions are worth holding: volume and spread come
+        # from a REST listing and describe the market's past, this describes what
+        # it did while we were watching.
+        self.quote_changes[ticker] = self.quote_changes.get(ticker, 0) + 1
 
         self.writer.enqueue(
             Quote(

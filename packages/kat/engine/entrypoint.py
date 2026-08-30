@@ -439,6 +439,54 @@ class Platform:
                 # features have something to read.
                 event_ingestor.set_definitions(last_event_definitions())
 
+        async def refresh_event_watchlist() -> None:
+            """Re-choose what to watch, dropping the markets that never move.
+
+            The watchlist used to be chosen once at start-up and never again,
+            though this module's own docstring said it was "refreshed on a slow
+            cycle" and ``set_watchlist`` has carried incremental add/remove
+            machinery for a refresh that never happened. So a process running
+            for a week watched whatever looked good on the day it started, long
+            after those markets had settled.
+
+            The ranking a listing can give -- volume, spread, time to close --
+            describes a market's past. The interval that just elapsed describes
+            what it did while we were watching, and that is the better predictor
+            of whether the next interval is worth a subscription slot. A market
+            that produced no top-of-book change at all is yielding neither
+            training data nor a trading opportunity, whatever its 24-hour volume
+            says.
+            """
+            while True:
+                await asyncio.sleep(settings.watchlist_refresh_s)
+                if self.event_rest is None:
+                    continue
+                try:
+                    movement = event_ingestor.take_movement()
+                    candidates = await select_event_watchlist(self.event_rest)
+                    current = list(event_ingestor.watchlist)
+                    stagnant = [t for t in current if movement.get(t, 0) == 0]
+                    # Keep the movers, and let fresh candidates compete for the
+                    # slots the still ones were holding.
+                    keep = [t for t in current if t not in stagnant]
+                    incoming = [t for t in candidates if t not in keep]
+                    watchlist = (keep + incoming)[: len(current) or None]
+
+                    await event_ingestor.set_watchlist(watchlist)
+                    event_ingestor.set_definitions(last_event_definitions())
+                    log.info(
+                        "ingestion.watchlist_refreshed",
+                        domain="event",
+                        kept=len(keep),
+                        dropped_stagnant=len(stagnant),
+                        moved=sum(1 for t in current if movement.get(t, 0) > 0),
+                        changes_seen=sum(movement.values()),
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    log.error("ingestion.watchlist_refresh_failed", error=str(exc), exc_info=True)
+
         self.app.register(
             ServiceComponent(
                 "event-market-data",
@@ -447,6 +495,9 @@ class Platform:
                 health=lambda: event_ws.signer is None or event_ingestor.healthy(),
                 critical=False,
             )
+        )
+        self.app.register(
+            ServiceComponent("event-watchlist", run=refresh_event_watchlist, critical=False)
         )
 
         if self.perps_enabled:
