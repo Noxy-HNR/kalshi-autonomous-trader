@@ -483,7 +483,21 @@ class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="KAT_",
         env_nested_delimiter="__",
-        env_file=".env",
+        # Anchored to the repository, not to the working directory.
+        #
+        # A bare ".env" is resolved against wherever the process happens to have
+        # been started, so anything launched from another directory silently got
+        # *no configuration at all* -- and silently is the whole problem. There
+        # is no error: environment reads back as paper, market data as demo,
+        # credentials as absent, and every one of those is a plausible value. A
+        # process reading production with real keys and one reading nothing look
+        # identical from the outside.
+        #
+        # It is a real path rather than a relative one for the same reason the
+        # scheduled task pins the venv interpreter: a thing that works when you
+        # test it by hand and fails when the OS starts it is worse than a thing
+        # that never works.
+        env_file=str(REPO_ROOT / ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
     )
