@@ -163,6 +163,11 @@ class TradingLoop:
         #: Features keyed by ticker, already filtered to what is knowable now.
         self.features: dict[str, dict[str, float]] = {}
 
+        #: Whether simulated fills should be booked against the local account.
+        #: Set by the entrypoint in PAPER only; live and demo get positions
+        #: from the reconciler and must not have a second source for them.
+        self.paper_fills: bool = False
+
         self.last_cycle: CycleResult | None = None
         self.cycles = 0
         self._last_summary_s = 0.0
@@ -476,10 +481,54 @@ class TradingLoop:
                     "exchange_order_id": order.exchange_order_id,
                 },
             )
-            if order.filled_qty_qc > 0 and strategy is not None:
-                strategy.on_fill(
-                    intent.ticker, order.filled_qty_qc, order.avg_fill_price_cc or 0
-                )
+            if order.filled_qty_qc > 0:
+                self._apply_paper_fill(intent, order)
+                if strategy is not None:
+                    strategy.on_fill(
+                        intent.ticker, order.filled_qty_qc, order.avg_fill_price_cc or 0
+                    )
+
+    def _apply_paper_fill(self, intent: OrderIntent, order: Any) -> None:
+        """Book a simulated fill against the local account.
+
+        Only in paper. Live and demo rebuild positions from the exchange through
+        the reconciler, and a local guess layered on top of that would be a
+        second source of truth for the same number.
+
+        Paper has no exchange to ask, and nothing was doing this job: 108
+        simulated fills were recorded against an account that still read exactly
+        its seeded balance, with no positions, no exposure and no profit or
+        loss. The strategies were trading and the dashboard had no way to show
+        whether any of it worked.
+        """
+        if not self.paper_fills or self.account_state is None:
+            return
+        apply = getattr(self.account_state, "apply_fill", None)
+        if apply is None:
+            return
+        realised = apply(
+            ticker=intent.ticker,
+            qty_qc=order.filled_qty_qc,
+            price_cc=order.avg_fill_price_cc or intent.limit_price_cc or 0,
+            is_buy=intent.is_buy,
+            fee_micros=order.fees_micros,
+            event_ticker=getattr(intent, "event_ticker", "") or "",
+            now_ms=self.clock.now_ms(),
+        )
+        # Mark value of what is still open, so equity does not fall by the cost
+        # of opening a position -- entering a trade is not a loss.
+        self.account_state.portfolio_value_micros = (
+            self.account_state.total_exposure_micros()
+        )
+        log.info(
+            "trading.paper_fill",
+            domain=self.market_type.value,
+            ticker=intent.ticker,
+            qty_qc=order.filled_qty_qc,
+            price_cc=order.avg_fill_price_cc,
+            realised_micros=realised,
+            balance_micros=self.account_state.balance_micros,
+        )
 
     # -- helpers -------------------------------------------------------------
 

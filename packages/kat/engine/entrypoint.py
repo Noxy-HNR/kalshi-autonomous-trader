@@ -323,6 +323,8 @@ class Platform:
                 balance_micros=seed_micros, updated_at_ms=now_ms
             )
             event_loop.account_state.peak_equity_micros = event_loop.account_state.equity_micros
+            event_loop.paper_fills = True
+            perp_loop.paper_fills = True
             if self.perps_enabled:
                 perp_loop.account_state = PerpAccountState(
                     equity_micros=seed_micros,
@@ -778,14 +780,29 @@ class Platform:
         self._publish_trading_gate()
 
     async def _reconcile_loop(self) -> None:
+        # Paper mode ticks faster than it reconciles, because the two are doing
+        # different jobs.
+        #
+        # There is no exchange account to reconcile against in paper, so this
+        # loop only keeps the seeded state's timestamp current. It did that once
+        # a minute against a thirty-second staleness budget, which left the state
+        # stale for half of every minute -- and the risk engine correctly refused
+        # every order in those windows. 125 of 226 decisions in one run were
+        # rejected on STALE_ACCOUNT_STATE, which read as a risk limit doing its
+        # job rather than a clock that was never wound.
+        #
+        # A third of the budget leaves room for a slow cycle without ever letting
+        # the stamp expire.
+        budget_s = self.settings.max_account_state_age_ms / 1000.0
+        paper = self.settings.environment is TradingEnvironment.PAPER
+        interval = min(60.0, budget_s / 3.0) if paper else 60.0
+
         while True:
-            await asyncio.sleep(60.0)
+            await asyncio.sleep(interval)
             try:
-                if self.settings.environment is not TradingEnvironment.PAPER:
+                if not paper:
                     await self._reconcile()
                 else:
-                    # Keep the seeded paper state fresh so the risk engines do
-                    # not reject on staleness.
                     now_ms = self.clock.now_ms()
                     for loop in self.context.loops.values():
                         if loop.account_state is not None:

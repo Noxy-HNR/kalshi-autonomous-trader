@@ -76,6 +76,92 @@ class EventAccountState:
     def equity_micros(self) -> int:
         return self.balance_micros + self.portfolio_value_micros
 
+
+    def apply_fill(
+        self,
+        *,
+        ticker: str,
+        qty_qc: int,
+        price_cc: int,
+        is_buy: bool,
+        fee_micros: int = 0,
+        event_ticker: str = "",
+        now_ms: int = 0,
+    ) -> int:
+        """Apply one fill to this account, returning the realised P&L in micros.
+
+        In live and demo the reconciler rebuilds positions from the exchange, so
+        nothing local has to. Paper has no exchange to ask: the fills are
+        simulated, and without this the account never changed. 108 fills were
+        recorded against an account that still read exactly its seeded $200 with
+        no positions, no exposure and no profit or loss -- so there was no way to
+        tell a strategy that was working from one that was not.
+
+        Semantics follow ``position_qc`` as Kalshi reports it: positive is YES,
+        negative is NO. Selling YES you do not hold *is* buying NO, so a sell
+        that opens a position costs ``1 - price`` per contract, and a position is
+        closed only when a fill opposes the sign it already has.
+        """
+        position = self.positions.get(ticker)
+        if position is None:
+            position = EventPositionState(ticker=ticker, event_ticker=event_ticker)
+            self.positions[ticker] = position
+        if event_ticker and not position.event_ticker:
+            position.event_ticker = event_ticker
+
+        # The fee is paid whichever way the fill goes, opening or closing.
+        self.balance_micros -= fee_micros
+
+        direction = 1 if is_buy else -1
+        remaining = qty_qc
+        realised = 0
+
+        closing = 0
+        if position.position_qc != 0 and (position.position_qc > 0) != (direction > 0):
+            closing = min(remaining, abs(position.position_qc))
+
+        if closing:
+            held = abs(position.position_qc)
+            long_position = position.position_qc > 0
+            # A long holds YES and is worth the YES price; a short holds NO and
+            # is worth what is left of the dollar.
+            proceeds_cc = price_cc if long_position else CC_PER_DOLLAR - price_cc
+            proceeds = proceeds_cc * closing
+
+            basis_total = (position.avg_entry_cc or 0) * held
+            released = basis_total if closing == held else basis_total * closing // held
+
+            realised = proceeds - released
+            self.balance_micros += proceeds
+            self.realized_pnl_today_micros += realised
+            position.position_qc -= closing if long_position else -closing
+            if position.position_qc == 0:
+                position.avg_entry_cc = None
+            remaining -= closing
+
+        if remaining > 0:
+            # Opening or adding. Buying YES costs the YES price; selling to open
+            # is buying NO, which costs the rest of the dollar.
+            cost_cc = price_cc if direction > 0 else CC_PER_DOLLAR - price_cc
+            held = abs(position.position_qc)
+            basis_total = (position.avg_entry_cc or 0) * held + cost_cc * remaining
+            position.position_qc += direction * remaining
+            new_held = abs(position.position_qc)
+            position.avg_entry_cc = (basis_total // new_held) if new_held else None
+            self.balance_micros -= cost_cc * remaining
+
+        # Exposure is what the position could still lose, which for an event
+        # contract is exactly what it cost: the downside is the whole premium.
+        position.exposure_micros = (position.avg_entry_cc or 0) * abs(position.position_qc)
+
+        if position.position_qc == 0:
+            self.positions.pop(ticker, None)
+
+        if now_ms:
+            self.updated_at_ms = now_ms
+        self.peak_equity_micros = max(self.peak_equity_micros, self.equity_micros)
+        return realised
+
     def total_exposure_micros(self) -> int:
         return sum(p.exposure_micros for p in self.positions.values())
 
