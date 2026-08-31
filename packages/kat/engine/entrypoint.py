@@ -907,11 +907,26 @@ async def run(settings: AppSettings | None = None) -> int:
     platform = await build_application(settings)
     try:
         await platform.discover_capabilities()
-        platform.build_trading()
 
-        # The database must be up before components that write to it start.
+        # The database comes up before anything is built, not after.
+        #
+        # build_trading() reads self.app.writer once and hands it to the decision
+        # recorder, both execution engines and the strategy registry. The writer
+        # is created by _start_database(), so building first captured None in all
+        # four -- and DecisionRecorder.record is explicitly "safe to call with no
+        # writer configured", so it logged decision.recorded and persisted
+        # nothing. Every table on the trading path stayed empty: decisions,
+        # orders, fills, strategies, strategy_performance. Market data and news
+        # were unaffected, because those components read self.app.writer later,
+        # which is why the database looked alive the whole time.
+        #
+        # 13,656 decisions were logged and none were stored before this was
+        # found. The audit trail is the one thing that cannot be reconstructed
+        # afterwards.
         await platform.app._start_database()
         await platform.app._load_persisted_state()
+
+        platform.build_trading()
 
         platform.register_components()
         report = await platform.app.start()
