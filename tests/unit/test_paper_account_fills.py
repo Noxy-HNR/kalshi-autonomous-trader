@@ -142,3 +142,129 @@ def test_the_timestamp_is_refreshed_when_supplied() -> None:
     state = _account()
     state.apply_fill(ticker="M", qty_qc=100, price_cc=4_000, is_buy=True, now_ms=9_999)
     assert state.updated_at_ms == 9_999
+
+
+# -- mark to market ----------------------------------------------------------
+#
+# Without marking, a position is only ever worth what it cost: equity moves when
+# a trade closes and at no other time, and every open position reports zero
+# unrealised P&L for its whole life. "Is this working?" then has no answer until
+# something is sold.
+
+from kat.common.enums import MarketType  # noqa: E402
+from kat.common.timeutil import SimulatedClock  # noqa: E402
+from kat.engine.trading import TradingLoop  # noqa: E402
+from kat.marketdata.book import OrderBook  # noqa: E402
+from kat.marketdata.state import MarketState  # noqa: E402
+
+MARK_T0 = 1_700_000_000_000
+
+
+class _Stub:
+    market_type = MarketType.EVENT
+
+    def working_orders(self) -> list[object]:
+        return []
+
+
+def _loop() -> tuple[TradingLoop, MarketState, EventAccountState]:
+    state = MarketState(MarketType.EVENT)
+    loop = TradingLoop(
+        market_type=MarketType.EVENT,
+        market_state=state,
+        risk_engine=None,
+        execution=_Stub(),  # type: ignore[arg-type]
+        recorder=None,  # type: ignore[arg-type]
+        clock=SimulatedClock(MARK_T0),
+    )
+    loop.paper_fills = True
+    loop.account_state = _account()
+    return loop, state, loop.account_state
+
+
+def _quote(state: MarketState, ticker: str, mid_cc: int, now_ms: int) -> None:
+    book = OrderBook.from_event_contract_levels(
+        ticker,
+        yes_levels=[(mid_cc - 50, 100_000)],
+        no_levels=[(CC_PER_DOLLAR - (mid_cc + 50), 100_000)],
+    )
+    state.apply_snapshot(ticker, book, now_ms=now_ms)
+
+
+def test_a_long_gains_when_the_market_rises() -> None:
+    loop, state, account = _loop()
+    account.apply_fill(ticker="M", qty_qc=1_000, price_cc=4_000, is_buy=True)
+    _quote(state, "M", 5_000, MARK_T0)
+    loop._mark_positions()
+    assert account.positions["M"].unrealized_pnl_micros == 1_000 * 1_000
+    assert account.portfolio_value_micros == 5_000 * 1_000
+
+
+def test_a_short_gains_when_the_market_falls() -> None:
+    """Short YES is long NO, so the mark runs the other way."""
+    loop, state, account = _loop()
+    account.apply_fill(ticker="M", qty_qc=1_000, price_cc=4_000, is_buy=False)
+    _quote(state, "M", 3_000, MARK_T0)
+    loop._mark_positions()
+    # Paid 6000cc for NO; NO is now worth 7000cc.
+    assert account.positions["M"].unrealized_pnl_micros == 1_000 * 1_000
+
+
+def test_opening_a_position_does_not_move_equity() -> None:
+    """The property that makes the dashboard number honest."""
+    loop, state, account = _loop()
+    _quote(state, "M", 4_000, MARK_T0)
+    before = account.equity_micros
+    account.apply_fill(ticker="M", qty_qc=1_000, price_cc=4_000, is_buy=True)
+    loop._mark_positions()
+    assert account.equity_micros == before
+
+
+def test_equity_tracks_the_market_while_a_position_is_open() -> None:
+    loop, state, account = _loop()
+    _quote(state, "M", 4_000, MARK_T0)
+    account.apply_fill(ticker="M", qty_qc=1_000, price_cc=4_000, is_buy=True)
+    loop._mark_positions()
+    opened = account.equity_micros
+
+    _quote(state, "M", 4_300, MARK_T0 + 1_000)
+    loop.clock = SimulatedClock(MARK_T0 + 1_000)
+    loop._mark_positions()
+    assert account.equity_micros == opened + 300 * 1_000
+
+
+def test_a_stale_market_keeps_its_last_mark_rather_than_going_to_zero() -> None:
+    """An absent price is not a price of nothing.
+
+    Marking to zero would report a total loss every time a feed hiccuped, which
+    is exactly the moment an operator is most likely to be looking.
+    """
+    loop, state, account = _loop()
+    _quote(state, "M", 4_000, MARK_T0)
+    account.apply_fill(ticker="M", qty_qc=1_000, price_cc=4_000, is_buy=True)
+    loop._mark_positions()
+    marked = account.portfolio_value_micros
+
+    # Far past any freshness budget, with no new quote.
+    loop.clock = SimulatedClock(MARK_T0 + 3_600_000)
+    loop._mark_positions()
+    assert account.portfolio_value_micros == marked
+
+
+def test_marking_is_inert_outside_paper() -> None:
+    """Live and demo take positions from the reconciler; a second source for the
+    same number is how two truths appear."""
+    loop, state, account = _loop()
+    loop.paper_fills = False
+    account.apply_fill(ticker="M", qty_qc=1_000, price_cc=4_000, is_buy=True)
+    account.portfolio_value_micros = 12_345
+    _quote(state, "M", 9_000, MARK_T0)
+    loop._mark_positions()
+    assert account.portfolio_value_micros == 12_345
+
+
+def test_no_positions_marks_to_nothing() -> None:
+    loop, _state, account = _loop()
+    loop._mark_positions()
+    assert account.portfolio_value_micros == 0
+    assert account.equity_micros == SEED

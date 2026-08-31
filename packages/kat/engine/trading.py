@@ -46,6 +46,7 @@ from kat.common.enums import (
     TradingEnvironment,
 )
 from kat.common.errors import KillSwitchEngaged, RiskRejection
+from kat.common.fixedpoint import CC_PER_DOLLAR
 from kat.common.ids import new_decision_id, use_correlation_id
 from kat.common.timeutil import Clock
 from kat.engine.decision import DecisionRecorder, TradeDecision
@@ -299,6 +300,7 @@ class TradingLoop:
             return result
 
         now_ms = self.clock.now_ms()
+        self._mark_positions()
         strategies = self.active_strategies()
         if not strategies:
             result.duration_ms = (time.monotonic() - started) * 1000
@@ -488,6 +490,50 @@ class TradingLoop:
                         intent.ticker, order.filled_qty_qc, order.avg_fill_price_cc or 0
                     )
 
+    def _mark_positions(self) -> None:
+        """Value open positions at the current market, in paper.
+
+        Without this a position is only ever worth what it cost. Equity moves
+        when a trade closes and at no other time, every position reports zero
+        unrealised P&L for its whole life, and the question the dashboard exists
+        to answer -- is this working -- has no answer until something is sold.
+
+        A long holds YES and is worth the YES price; a short holds NO and is
+        worth what is left of the dollar. Positions in markets that have gone
+        stale keep their last mark rather than being written to zero: an absent
+        price is not a price of nothing, and marking to zero would show a total
+        loss every time a feed hiccuped.
+        """
+        if not self.paper_fills or self.account_state is None:
+            return
+        positions = getattr(self.account_state, "positions", None)
+        if not positions:
+            self.account_state.portfolio_value_micros = 0
+            return
+
+        now_ms = self.clock.now_ms()
+        total = 0
+        for ticker, position in positions.items():
+            qty = abs(position.position_qc)
+            if qty == 0:
+                continue
+            basis = (position.avg_entry_cc or 0) * qty
+
+            snapshot = self.market_state.get(ticker)
+            mid = snapshot.mid_cc if snapshot is not None else None
+            if mid is None or not self.market_state.is_fresh(ticker, now_ms=now_ms):
+                # Keep the last mark. The position is still worth whatever it was
+                # worth a moment ago; what is missing is our view of it.
+                total += basis + position.unrealized_pnl_micros
+                continue
+
+            value_cc = mid if position.position_qc > 0 else CC_PER_DOLLAR - mid
+            value = value_cc * qty
+            position.unrealized_pnl_micros = value - basis
+            total += value
+
+        self.account_state.portfolio_value_micros = total
+
     def _apply_paper_fill(self, intent: OrderIntent, order: Any) -> None:
         """Book a simulated fill against the local account.
 
@@ -515,11 +561,9 @@ class TradingLoop:
             event_ticker=getattr(intent, "event_ticker", "") or "",
             now_ms=self.clock.now_ms(),
         )
-        # Mark value of what is still open, so equity does not fall by the cost
-        # of opening a position -- entering a trade is not a loss.
-        self.account_state.portfolio_value_micros = (
-            self.account_state.total_exposure_micros()
-        )
+        # Re-marked immediately so equity does not dip by the cost of the
+        # position until the next cycle: entering a trade is not a loss.
+        self._mark_positions()
         log.info(
             "trading.paper_fill",
             domain=self.market_type.value,
