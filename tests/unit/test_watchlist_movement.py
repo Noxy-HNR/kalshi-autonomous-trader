@@ -115,3 +115,71 @@ def test_movement_distinguishes_the_two_populations() -> None:
     stagnant = [t for t in ("STILL", "MOVER") if movement.get(t, 0) == 0]
     assert stagnant == [], "both moved at least once"
     assert movement["MOVER"] > movement["STILL"]
+
+
+# -- orphaned state ----------------------------------------------------------
+
+
+class _RecordingWS:
+    connected = True
+
+    def __init__(self) -> None:
+        self.subscribed: list[str] = []
+
+    def on(self, *_a: object, **_k: object) -> None:
+        pass
+
+    async def subscribe(self, _channels: object, *, market_tickers: list[str]) -> object:
+        self.subscribed = list(market_tickers)
+        return object()
+
+    async def update_subscription(
+        self, _sub: object, *, add: list[str], remove: list[str]
+    ) -> None:
+        self.subscribed = [t for t in self.subscribed if t not in remove] + add
+
+
+async def _drive_watchlist(first: list[str], second: list[str]) -> MarketState:
+    ws = _RecordingWS()
+    ing = MarketDataIngestor(
+        market_type=MarketType.EVENT,
+        ws=ws,  # type: ignore[arg-type]
+        state=MarketState(MarketType.EVENT),
+        clock=SystemClock(),
+        writer=None,
+        persist_quotes=False,
+    )
+    await ing.set_watchlist(first)
+    # Definitions for markets that were only ever *candidates*: set_definitions
+    # ensures a snapshot for each, which is how the state grew past the
+    # subscription.
+    ing.set_definitions({t: {"title": t} for t in [*first, "GHOST-A", "GHOST-B"]})
+    await ing.set_watchlist(second)
+    return ing.state
+
+
+def test_markets_we_are_not_subscribed_to_are_dropped_from_state() -> None:
+    """A snapshot nothing will ever update is permanently stale.
+
+    The trading loop counts every market in the state as one it examined, so
+    these inflate both the examined and the stale counts while being neither.
+    Live, 101 markets sat in a state backing a 60-market subscription, 53 of
+    them unreachable.
+    """
+    import asyncio
+
+    state = asyncio.run(_drive_watchlist(["A", "B", "C"], ["A", "B", "D"]))
+    tickers = set(state.tickers())
+    assert "GHOST-A" not in tickers and "GHOST-B" not in tickers
+    assert "C" not in tickers, "a market dropped from the watchlist must leave the state"
+    # "D" is subscribed but has no snapshot yet, and that is correct: a market
+    # enters the state when data arrives for it, not when it is subscribed.
+    assert tickers <= {"A", "B", "D"}
+    assert {"A", "B"} <= tickers
+
+
+def test_the_state_never_exceeds_the_subscription() -> None:
+    import asyncio
+
+    state = asyncio.run(_drive_watchlist(["A", "B"], ["A", "B"]))
+    assert len(state.tickers()) <= 2

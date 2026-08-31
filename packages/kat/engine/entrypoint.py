@@ -71,6 +71,12 @@ log = get_logger(__name__)
 __all__ = ["build_application", "main", "run"]
 
 
+def _subscribed_definitions(watchlist: list[str]) -> dict[str, dict[str, Any]]:
+    """Market definitions, restricted to the markets actually subscribed."""
+    definitions = last_event_definitions()
+    return {t: definitions[t] for t in watchlist if t in definitions}
+
+
 class Platform:
     """Assembles every subsystem and hands the application its components."""
 
@@ -437,7 +443,15 @@ class Platform:
                 # The selector already fetched each market's title, rules and
                 # close time; attach them so the news matcher and the term
                 # features have something to read.
-                event_ingestor.set_definitions(last_event_definitions())
+                #
+                # Filtered to what was actually subscribed. The selector returns
+                # definitions for every candidate it considered, and
+                # set_definitions ensures a snapshot for each one it is given --
+                # so handing it the unfiltered set creates state entries for
+                # markets nothing will ever send an update about.
+                event_ingestor.set_definitions(
+                    _subscribed_definitions(event_ingestor.watchlist)
+                )
 
         async def refresh_event_watchlist() -> None:
             """Re-choose what to watch, dropping the markets that never move.
@@ -473,7 +487,9 @@ class Platform:
                     watchlist = (keep + incoming)[: len(current) or None]
 
                     await event_ingestor.set_watchlist(watchlist)
-                    event_ingestor.set_definitions(last_event_definitions())
+                    event_ingestor.set_definitions(
+                        _subscribed_definitions(event_ingestor.watchlist)
+                    )
                     log.info(
                         "ingestion.watchlist_refreshed",
                         domain="event",

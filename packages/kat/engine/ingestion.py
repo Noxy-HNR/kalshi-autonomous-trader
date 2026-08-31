@@ -172,6 +172,22 @@ class MarketDataIngestor:
                 self.state.drop(ticker)
                 self._last_quote.pop(ticker, None)
             self.watchlist = new
+
+        # Anything in the state we are not subscribed to can never update again,
+        # so it would sit there being permanently stale and being counted as a
+        # market the trading loop examined. These arrive from set_definitions,
+        # which ensures a snapshot for every market it is given -- and the
+        # watchlist selector hands back definitions for every *candidate* it
+        # considered, not only the ones that won a slot.
+        orphans = [t for t in self.state.tickers() if t not in set(new)]
+        for ticker in orphans:
+            self.state.drop(ticker)
+            self._last_quote.pop(ticker, None)
+        if orphans:
+            log.info(
+                "ingestion.dropped_unsubscribed",
+                domain=self.market_type.value, markets=len(orphans),
+            )
             log.info(
                 "ingestion.watchlist_updated",
                 domain=self.market_type.value, added=len(added), removed=len(removed),
