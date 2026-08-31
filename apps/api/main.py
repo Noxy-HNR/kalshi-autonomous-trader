@@ -178,6 +178,21 @@ async def perp_positions() -> dict[str, Any]:
 # =============================================================================
 
 
+def _row_name(ctx: Any, market_type: str, ticker: str) -> str:
+    """The human name for a stored row's market, or the ticker.
+
+    Orders and fills are read back from the database, where only the ticker is
+    stored; the names live in the engine's market state. A row for a market that
+    has since left the watchlist has no name to find, and falls back to the
+    ticker rather than to nothing.
+    """
+    try:
+        domain = MarketType(market_type)
+    except ValueError:
+        return ticker
+    return ctx.market_label(domain, ticker)["name"]
+
+
 @api.get("/events/positions")
 async def event_positions() -> dict[str, Any]:
     ctx = get_context()
@@ -189,10 +204,14 @@ async def event_positions() -> dict[str, Any]:
         "available": True,
         "positions": [
             {
-                "ticker": p.ticker,
-                "event_ticker": p.event_ticker,
+                # The exchange's own words for what this contract is, so a
+                # position reads as "NO on Democratic Party" rather than as
+                # CONTROLH-2026-D. On a multi-outcome event the ticker alone
+                # cannot say which sibling this is.
+                **ctx.describe_side(
+                    MarketType.EVENT, p.ticker, position_qc=p.position_qc
+                ),
                 "position": str(qc_to_decimal(p.position_qc)),
-                "side": "yes" if p.position_qc > 0 else "no",
                 "avg_entry": str(price_cc_to_decimal(p.avg_entry_cc)) if p.avg_entry_cc else None,
                 "exposure_usd": str(micros_to_decimal(p.exposure_micros)),
                 "unrealized_pnl_usd": str(micros_to_decimal(p.unrealized_pnl_micros)),
@@ -224,6 +243,11 @@ async def markets(
             out.append(
                 {
                     "ticker": ticker,
+                    # The exchange's own name for the contract. A table of
+                    # tickers is unreadable, and on a multi-outcome event the
+                    # ticker cannot say which sibling a row is.
+                    "name": ctx.market_label(domain, ticker)["name"],
+                    "question": ctx.market_label(domain, ticker)["question"],
                     "market_type": domain.value,
                     "event_ticker": snap.event_ticker,
                     "status": snap.status,
@@ -264,6 +288,7 @@ async def orders(
     market_type: Literal["event", "perp"] | None = None,
     limit: int = Query(200, ge=1, le=1000),
 ) -> dict[str, Any]:
+    ctx = get_context()
     db = get_database()
     query = select(Order).order_by(desc(Order.created_at)).limit(limit)
     if state:
@@ -280,6 +305,7 @@ async def orders(
                 "exchange_order_id": o.exchange_order_id,
                 "market_type": o.market_type,
                 "ticker": o.ticker,
+                "name": _row_name(ctx, o.market_type, o.ticker),
                 "strategy_id": o.strategy_id,
                 "state": o.state,
                 "side": o.outcome_side or o.book_side,
@@ -305,6 +331,7 @@ async def orders(
 
 @api.get("/fills")
 async def fills(limit: int = Query(200, ge=1, le=1000)) -> dict[str, Any]:
+    ctx = get_context()
     db = get_database()
     async with db.session() as session:
         rows = (
@@ -316,6 +343,7 @@ async def fills(limit: int = Query(200, ge=1, le=1000)) -> dict[str, Any]:
                 "fill_id": f.fill_id,
                 "order_id": f.order_id,
                 "ticker": f.ticker,
+                "name": _row_name(ctx, f.market_type, f.ticker),
                 "market_type": f.market_type,
                 "strategy_id": f.strategy_id,
                 "ts": f.ts.isoformat() if f.ts else None,

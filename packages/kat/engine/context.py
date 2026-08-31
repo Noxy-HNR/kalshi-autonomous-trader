@@ -162,6 +162,66 @@ class EngineContext:
             )
         return summary
 
+    def market_label(self, market_type: MarketType, ticker: str) -> dict[str, Any]:
+        """How a market and a side should be named to a person.
+
+        A ticker like ``KXPREMIERLEAGUE-27-CFC`` is precise and unreadable, and
+        it is actively ambiguous on a multi-outcome event: twenty Premier League
+        contracts share a prefix and differ only in the last few characters. The
+        exchange already publishes what separates them.
+
+        ``outcome`` is the thing this contract is about ("Chelsea"), which is the
+        field that disambiguates siblings. ``question`` is the whole question
+        ("Will Chelsea win the English Premier League?"). ``event`` groups the
+        siblings so a reader can see that four of their positions are the same
+        bet wearing different names.
+
+        Every field degrades to the ticker rather than to nothing: a market whose
+        definition has not arrived yet still has to be nameable.
+        """
+        state = self.market_states.get(market_type)
+        snapshot = state.get(ticker) if state is not None else None
+        meta = dict(snapshot.metadata) if snapshot is not None else {}
+
+        outcome = str(meta.get("yes_sub_title") or "").strip()
+        question = str(meta.get("title") or "").strip()
+        event = str(meta.get("event_ticker") or "").strip()
+        if not event and snapshot is not None:
+            event = snapshot.event_ticker or ""
+
+        return {
+            "ticker": ticker,
+            # Short enough for a table column, and the thing a person recognises.
+            "name": outcome or question or ticker,
+            "outcome": outcome or None,
+            "question": question or None,
+            "event_ticker": event or None,
+        }
+
+    def describe_side(
+        self, market_type: MarketType, ticker: str, *, position_qc: int
+    ) -> dict[str, Any]:
+        """A position, said in words.
+
+        Holding YES pays if the question resolves yes; holding NO pays if it does
+        not. Stating that explicitly matters most on the NO side, where the
+        ticker, the outcome name and the question all describe the thing you are
+        betting *against* -- a position in "Democratic Party" that profits when
+        Democrats lose reads as its own opposite until someone says so.
+        """
+        label = self.market_label(market_type, ticker)
+        long_yes = position_qc > 0
+        question = label["question"]
+        pays_if = (question if long_yes else f"NOT: {question}") if question else None
+        label.update(
+            side="yes" if long_yes else "no",
+            holding=(
+                f"YES on {label['name']}" if long_yes else f"NO on {label['name']}"
+            ),
+            pays_if=pays_if,
+        )
+        return label
+
     def leverage_panel(self) -> dict[str, Any]:
         """The Perpetuals tab's leverage panel.
 

@@ -72,7 +72,15 @@ export default function OrdersPage() {
         empty="No orders yet. In paper mode an order appears as soon as a strategy finds an edge that survives costs."
         columns={[
           { header: "When", cell: (o) => timeAgo(o.submitted_ts) },
-          { header: "Market", cell: (o) => <span className="mono">{o.ticker}</span> },
+          {
+            header: "Market",
+            cell: (o) => (
+              <div>
+                <div>{o.name ?? o.ticker}</div>
+                <div className="mono small muted">{o.ticker}</div>
+              </div>
+            ),
+          },
           { header: "Domain", cell: (o) => <Pill>{o.market_type}</Pill> },
           { header: "Side", cell: (o) => o.side ?? "--" },
           { header: "State", cell: (o) => <Pill tone={stateTone(o.state)}>{o.state}</Pill> },

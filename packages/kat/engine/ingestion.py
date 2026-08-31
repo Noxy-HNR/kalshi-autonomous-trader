@@ -592,6 +592,12 @@ async def select_event_watchlist(
     _LAST_DEFINITIONS.update({
         m.ticker: {
             "title": m.title or "",
+            # What this market is a market *about*: on a multi-outcome event
+            # every sibling shares a ticker prefix and differs only here, so
+            # "Chelsea" is what separates one Premier League contract from the
+            # nineteen next to it. Without it a position reads as a ticker.
+            "yes_sub_title": m.yes_sub_title or "",
+            "no_sub_title": m.no_sub_title or "",
             "rules_primary": m.rules_primary or "",
             "event_ticker": m.event_ticker or "",
             "close_ts_ms": int(m.close_time.timestamp() * 1000) if m.close_time else None,

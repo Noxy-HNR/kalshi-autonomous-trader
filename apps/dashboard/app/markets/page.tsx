@@ -37,7 +37,15 @@ export default function MarketsPage() {
         rowKey={(m) => m.ticker}
         empty="No markets are being watched. Market data needs Kalshi credentials -- the WebSocket is authenticated even for public channels."
         columns={[
-          { header: "Market", cell: (m) => <span className="mono">{m.ticker}</span> },
+          {
+            header: "Market",
+            cell: (m) => (
+              <div>
+                <div>{m.name ?? m.ticker}</div>
+                <div className="mono small muted">{m.ticker}</div>
+              </div>
+            ),
+          },
           { header: "Domain", cell: (m) => <Pill>{m.market_type}</Pill> },
           { header: "Status", cell: (m) => m.status ?? "--" },
           { header: "Bid", num: true, cell: (m) => m.bid ?? "--" },

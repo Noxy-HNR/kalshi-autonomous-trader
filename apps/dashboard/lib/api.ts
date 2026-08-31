@@ -173,6 +173,7 @@ export interface Decision {
 }
 
 export interface OrderRow {
+  name?: string | null;
   order_id: string;
   exchange_order_id: string | null;
   market_type: string;
@@ -193,6 +194,7 @@ export interface OrderRow {
 }
 
 export interface MarketRow {
+  name?: string | null;
   ticker: string;
   market_type: string;
   event_ticker: string;

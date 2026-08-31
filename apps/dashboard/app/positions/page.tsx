@@ -10,6 +10,11 @@ import { PAGE } from "@/lib/explainers";
 
 interface AnyPosition {
   ticker: string;
+  name?: string | null;
+  question?: string | null;
+  holding?: string | null;
+  pays_if?: string | null;
+  event_ticker?: string | null;
   position: string;
   exposure_usd?: string;
   notional_usd?: string;
@@ -45,7 +50,33 @@ export default function PositionsPage() {
         rowKey={(p) => `e-${p.ticker}`}
         empty="No open event-contract positions."
         columns={[
-          { header: "Market", cell: (p) => <span className="mono">{p.ticker}</span> },
+          {
+            header: "Market",
+            // The exchange's own name for the contract, with the ticker beneath
+            // it. A ticker is precise and unreadable, and on a multi-outcome
+            // event it cannot say which sibling a row is: twenty Premier League
+            // contracts differ only in their last few characters.
+            cell: (p) => (
+              <div>
+                <div>{p.name ?? p.ticker}</div>
+                <div className="mono small muted">{p.ticker}</div>
+              </div>
+            ),
+          },
+          {
+            header: "Position",
+            // Stated in words, because the NO side reads as its own opposite
+            // otherwise: a holding in "Democratic Party" that profits when the
+            // Democrats lose needs saying out loud.
+            cell: (p) => (
+              <div>
+                <div>{p.holding ?? "--"}</div>
+                {p.pays_if ? (
+                  <div className="small muted">pays if {p.pays_if}</div>
+                ) : null}
+              </div>
+            ),
+          },
           { header: "Side", cell: (p) => <Pill>{p.side ?? "--"}</Pill> },
           { header: "Size", num: true, cell: (p) => p.position },
           { header: "Avg entry", num: true, cell: (p) => p.avg_entry ?? "--" },
@@ -60,7 +91,33 @@ export default function PositionsPage() {
         rowKey={(p) => `p-${p.ticker}`}
         empty="No open perpetual positions."
         columns={[
-          { header: "Market", cell: (p) => <span className="mono">{p.ticker}</span> },
+          {
+            header: "Market",
+            // The exchange's own name for the contract, with the ticker beneath
+            // it. A ticker is precise and unreadable, and on a multi-outcome
+            // event it cannot say which sibling a row is: twenty Premier League
+            // contracts differ only in their last few characters.
+            cell: (p) => (
+              <div>
+                <div>{p.name ?? p.ticker}</div>
+                <div className="mono small muted">{p.ticker}</div>
+              </div>
+            ),
+          },
+          {
+            header: "Position",
+            // Stated in words, because the NO side reads as its own opposite
+            // otherwise: a holding in "Democratic Party" that profits when the
+            // Democrats lose needs saying out loud.
+            cell: (p) => (
+              <div>
+                <div>{p.holding ?? "--"}</div>
+                {p.pays_if ? (
+                  <div className="small muted">pays if {p.pays_if}</div>
+                ) : null}
+              </div>
+            ),
+          },
           {
             header: "Side",
             cell: (p) => (
