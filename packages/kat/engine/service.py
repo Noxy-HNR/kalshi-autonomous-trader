@@ -220,6 +220,11 @@ def retrain_task_xml(user: str | None = None, *, day: str = "Sunday", at: str = 
         user,
         task_name=RETRAIN_TASK_NAME,
         module="scripts.train_model",
+        # No arguments: the script's defaults are the ones the evidence
+        # supports, so a weekly retrain trains what a hand-run one does.
+        # Settlement is the better target and cannot be split honestly on
+        # this much history yet; run it by hand with --label settlement to
+        # see whether that has changed.
         description=(
             "Kalshi Autonomous Trader weekly retrain. Trains, scores against the "
             "selection gates, and records the outcome. Never deploys."
