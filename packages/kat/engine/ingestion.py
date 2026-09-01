@@ -505,6 +505,17 @@ _LAST_DEFINITIONS: dict[str, dict[str, Any]] = {}
 #: settle within a year, against 9 within a week.
 _WATCH_MAX_DAYS_TO_CLOSE = 365
 
+#: How many watchlist slots go to markets chosen for resolving soon rather than
+#: for trading well. A settlement label is the only target MispricingStrategy can
+#: read, and a market that does not resolve while we watch it can never carry
+#: one. A quarter of the list is enough to keep labels arriving without giving up
+#: the markets actually worth trading.
+_LEARNING_SLOTS = 15
+
+#: How soon a market must close to count for the learning slice. Long enough to
+#: find liquid ones, short enough that they resolve inside a training window.
+_LEARNING_MAX_DAYS = 7
+
 #: How much a market must have traded in a day to be worth watching.
 #:
 #: Movement is necessary and not sufficient: a market that jumped on four
@@ -602,6 +613,60 @@ def _move_vs_cost(market: Any) -> float | None:
         # live contract cannot trade at $0.0000 anyway.
         return None
     return abs(last - previous) / cost
+
+
+def _with_learning_slots(
+    picked: list[Any], candidates: list[Any], *, limit: int
+) -> list[Any]:
+    """Reserve part of the watchlist for markets that will actually resolve.
+
+    Trading and learning want different markets, and the difference is not a
+    matter of degree.
+
+    The economic filter selects markets where a move can pay for itself, and on
+    the live board 717 of the 734 that qualify close more than a month out --
+    only one inside a week. Those never resolve while we are watching, so they
+    can never carry a settlement label, and a settlement label is the only target
+    ``MispricingStrategy`` can read. A watchlist made entirely of them teaches
+    the platform nothing, forever, however well it trades.
+
+    The evidence is direct. Every settlement the platform has recorded came from
+    the *old* volume-ranked watchlist, which happened to include same-day
+    baseball, and every one of them closed near the end of the history -- so the
+    first settlement dataset could not be split honestly at all. Purging emptied
+    the validation window even at a zero embargo.
+
+    So a slice of the subscription budget goes to markets closing soon, ranked by
+    volume, chosen from the quoted and tradeable set rather than the economically
+    eligible one: their job is to resolve and be labelled, not to be traded. The
+    risk engine still decides whether any of them is worth an order, and refuses
+    the wide ones on its own.
+    """
+    if limit <= _LEARNING_SLOTS:
+        return picked[:limit]
+
+    soon = [
+        m
+        for m in candidates
+        if _closes_within(m, _LEARNING_MAX_DAYS)
+        and (m.volume_24h_qc or 0) >= _MIN_WATCH_VOLUME_QC
+    ]
+    soon.sort(key=lambda m: float(m.volume_24h_qc or 0), reverse=True)
+
+    kept = picked[: limit - _LEARNING_SLOTS]
+    seen = {m.ticker for m in kept}
+    learning = [m for m in soon if m.ticker not in seen][:_LEARNING_SLOTS]
+    if learning:
+        log.info(
+            "ingestion.learning_slots",
+            domain="event",
+            reserved=len(learning),
+            closing_within_days=_LEARNING_MAX_DAYS,
+            note="markets that resolve are the only ones that can be labelled",
+        )
+    # Anything the learning slice could not fill goes back to the ranking.
+    remainder = [m for m in picked if m.ticker not in seen and m not in learning]
+    return (kept + learning + remainder)[:limit]
 
 
 def last_event_definitions() -> dict[str, dict[str, Any]]:
@@ -709,7 +774,7 @@ async def select_event_watchlist(
             min_move_vs_cost=_MIN_MOVE_VS_COST,
             note="watching the best of a bad board; expect very few intents",
         )
-    picked = quotable[:limit]
+    picked = _with_learning_slots(quotable, tradeable, limit=limit)
     chosen = [m.ticker for m in picked]
     # Kept rather than discarded: these objects already carry the title, rules
     # and close time that the news matcher and the term features need, and

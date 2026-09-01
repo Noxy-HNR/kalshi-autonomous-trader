@@ -162,3 +162,98 @@ class TestVolatilityFallsBackToTheWindowThisVenueSupports:
 
         assert per_bar_volatility_cc(self._ctx({})) is None
         assert per_bar_volatility_cc(self._ctx({"realized_vol_5m_cc": 0.0})) is None
+
+
+class TestSomeSlotsGoToMarketsThatWillResolve:
+    """Trading and learning want different markets.
+
+    The economic filter picks markets where a move can pay for itself, and on
+    the live board 717 of the 734 that qualify close more than a month out --
+    only one inside a week. Those never resolve while we watch them, so they can
+    never carry a settlement label, and a settlement label is the only target
+    MispricingStrategy can read.
+
+    Every settlement the platform has recorded came from the old volume-ranked
+    watchlist, which happened to include same-day baseball, and all of them
+    closed near the end of the history. That is why the first settlement dataset
+    could not be split honestly: purging emptied validation even at a zero
+    embargo.
+    """
+
+    from datetime import UTC, datetime, timedelta
+
+    @staticmethod
+    def _market(ticker, days_to_close, volume=1_000_000):
+        from dataclasses import dataclass
+        from datetime import UTC, datetime, timedelta
+
+        @dataclass
+        class _M:
+            ticker: str
+            close_time: object
+            volume_24h_qc: int
+            yes_bid_cc: int = 4_900
+            yes_ask_cc: int = 5_100
+            last_price_cc: int = 5_000
+            previous_price_cc: int = 4_000
+
+        return _M(
+            ticker=ticker,
+            close_time=datetime.now(UTC) + timedelta(days=days_to_close),
+            volume_24h_qc=volume,
+        )
+
+    def test_soon_closing_markets_take_reserved_slots(self):
+        from kat.engine.ingestion import _LEARNING_SLOTS, _with_learning_slots
+
+        far = [self._market(f"FAR{i}", 200) for i in range(60)]
+        soon = [self._market(f"SOON{i}", 2) for i in range(20)]
+
+        picked = _with_learning_slots(far, far + soon, limit=60)
+
+        chosen = {m.ticker for m in picked}
+        assert len(picked) == 60
+        assert sum(1 for t in chosen if t.startswith("SOON")) == _LEARNING_SLOTS
+
+    def test_the_trading_slice_keeps_the_rest(self):
+        from kat.engine.ingestion import _LEARNING_SLOTS, _with_learning_slots
+
+        far = [self._market(f"FAR{i}", 200) for i in range(60)]
+        soon = [self._market(f"SOON{i}", 2) for i in range(20)]
+
+        picked = _with_learning_slots(far, far + soon, limit=60)
+
+        far_kept = sum(1 for m in picked if m.ticker.startswith("FAR"))
+        assert far_kept == 60 - _LEARNING_SLOTS
+
+    def test_no_soon_closing_market_leaves_the_ranking_alone(self):
+        """A board with nothing resolving soon is not a reason to watch less."""
+        from kat.engine.ingestion import _with_learning_slots
+
+        far = [self._market(f"FAR{i}", 200) for i in range(60)]
+
+        picked = _with_learning_slots(far, far, limit=60)
+
+        assert len(picked) == 60
+        assert all(m.ticker.startswith("FAR") for m in picked)
+
+    def test_an_illiquid_soon_closing_market_is_not_reserved_a_slot(self):
+        """Resolving is necessary; being tradeable at all is still required."""
+        from kat.engine.ingestion import _with_learning_slots
+
+        far = [self._market(f"FAR{i}", 200) for i in range(60)]
+        thin = [self._market("THIN", 2, volume=10)]
+
+        picked = _with_learning_slots(far, far + thin, limit=60)
+
+        assert "THIN" not in {m.ticker for m in picked}
+
+    def test_a_watchlist_smaller_than_the_reservation_is_untouched(self):
+        from kat.engine.ingestion import _with_learning_slots
+
+        far = [self._market(f"FAR{i}", 200) for i in range(5)]
+        soon = [self._market("SOON", 2)]
+
+        picked = _with_learning_slots(far, far + soon, limit=5)
+
+        assert [m.ticker for m in picked] == [f"FAR{i}" for i in range(5)]
