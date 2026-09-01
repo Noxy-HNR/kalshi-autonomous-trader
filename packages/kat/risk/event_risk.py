@@ -584,18 +584,12 @@ class EventRiskEngine:
 
     @staticmethod
     def _edge_cc(intent: OrderIntent) -> int:
-        """Edge in centicents: how far the price is from our fair value.
+        """Edge in centicents, from the single definition on the intent.
 
-        Signed so that a YES buy below fair value and a NO buy above it both
-        register as positive edge.
+        This gate and the audit record used to compute it separately, and only
+        one of them signed the NO side correctly.
         """
-        if intent.fair_value_cc is None:
-            return 0
-        if intent.outcome_side is OutcomeSide.NO:
-            # A NO contract is worth (1 - fair_value); its edge is that value
-            # minus what we pay for it.
-            return (CC_PER_DOLLAR - intent.fair_value_cc) - intent.limit_price_cc
-        return intent.fair_value_cc - intent.limit_price_cc
+        return intent.edge_cc() or 0
 
     def _check_market_quality(
         self, book: OrderBook, qty: int, intent: OrderIntent, checks: list[CheckResult]

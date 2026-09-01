@@ -21,7 +21,7 @@ from decimal import Decimal
 from typing import Any
 
 from kat.common.enums import BookSide, MarketType, OutcomeSide, RiskDecision
-from kat.common.fixedpoint import micros_to_decimal
+from kat.common.fixedpoint import CC_PER_DOLLAR, micros_to_decimal
 
 __all__ = ["CheckResult", "OrderIntent", "RiskVerdict"]
 
@@ -113,6 +113,32 @@ class OrderIntent:
         if self.book_side is not None:
             return self.book_side is BookSide.BID
         return self.outcome_side is OutcomeSide.YES
+
+
+    def edge_cc(self, market_price_cc: int | None = None) -> int | None:
+        """Signed edge in centicents: what it is worth, less what we pay.
+
+        Signed so a YES buy below fair value and a NO buy above it both come out
+        positive. The NO side is the half that is easy to get wrong: a NO
+        contract is worth ``1 - fair_value``, not ``fair_value``, so the same
+        subtraction on both sides misprices every NO trade by the whole dollar.
+
+        This lives on the intent because it was previously written twice -- once
+        in the risk engine, which handled the NO side, and once in the decision
+        recorder, which did not. The gate approved a Chelsea NO at +492, which
+        was right, and the audit trail recorded the identical trade at -7,492,
+        which was the YES formula applied to a NO order. Both numbers described
+        the same order. Only one of them was ever read by a person, and it said
+        the platform was buying things worth ten cents for eighty-five.
+        """
+        if self.fair_value_cc is None:
+            return None
+        reference = self.limit_price_cc if self.limit_price_cc else market_price_cc
+        if reference is None:
+            return None
+        if self.outcome_side is OutcomeSide.NO:
+            return (CC_PER_DOLLAR - self.fair_value_cc) - reference
+        return self.fair_value_cc - reference
 
 
 @dataclass(slots=True)

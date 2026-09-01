@@ -338,10 +338,9 @@ def _side(intent: OrderIntent) -> str | None:
 
 
 def _edge(intent: OrderIntent, market_price_cc: int | None) -> int | None:
-    """Signed edge in centicents between fair value and the price we would pay."""
-    if intent.fair_value_cc is None:
-        return None
-    reference = intent.limit_price_cc if intent.limit_price_cc else market_price_cc
-    if reference is None:
-        return None
-    return intent.fair_value_cc - reference
+    """Signed edge in centicents. See :meth:`OrderIntent.edge_cc`.
+
+    Kept as a thin wrapper rather than inlined, because the name is used at the
+    call site and the indirection is where the old, unsigned version lived.
+    """
+    return intent.edge_cc(market_price_cc)

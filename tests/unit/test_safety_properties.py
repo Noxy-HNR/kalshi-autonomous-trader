@@ -153,3 +153,64 @@ class TestMoneyStaysExact:
 
         with pytest.raises((ValueError, TypeError, ArithmeticError)):
             parse_price_cc(bad)
+
+
+class TestEdgeIsSignedTheSameWayEverywhere:
+    """The gate and the audit record must not compute edge separately.
+
+    They did, and only one signed the NO side. A NO contract is worth
+    ``1 - fair_value``, so the plain subtraction misprices every NO trade by the
+    whole dollar. The gate approved a Chelsea NO at +492, which was right; the
+    audit trail recorded the identical order at -7,492, which is the YES formula
+    applied to a NO. Both described the same trade, and the one a person reads
+    said the platform was buying things worth ten cents for eighty-five.
+    """
+
+    @staticmethod
+    def _intent(side, limit_price_cc, fair_value_cc):
+        from kat.common.enums import MarketType
+        from kat.risk.types import OrderIntent
+
+        return OrderIntent(
+            market_type=MarketType.EVENT,
+            ticker="KXPREMIERLEAGUE-27-CFC",
+            qty_qc=100,
+            limit_price_cc=limit_price_cc,
+            outcome_side=side,
+            fair_value_cc=fair_value_cc,
+        )
+
+    def test_a_no_buy_below_its_worth_has_positive_edge(self):
+        """The real trade: fair YES $0.1008, NO bought at $0.85, worth $0.8992."""
+        from kat.common.enums import OutcomeSide
+
+        intent = self._intent(OutcomeSide.NO, 8_500, 1_008)
+        assert intent.edge_cc() == 492
+
+    def test_a_yes_buy_above_its_worth_has_negative_edge(self):
+        from kat.common.enums import OutcomeSide
+
+        assert self._intent(OutcomeSide.YES, 1_550, 1_008).edge_cc() == -542
+
+    def test_a_yes_buy_below_its_worth_has_positive_edge(self):
+        from kat.common.enums import OutcomeSide
+
+        assert self._intent(OutcomeSide.YES, 1_000, 1_500).edge_cc() == 500
+
+    def test_the_risk_gate_and_the_audit_record_agree(self):
+        """The property that was violated, stated directly."""
+        from kat.common.enums import OutcomeSide
+        from kat.engine.decision import _edge
+        from kat.risk.event_risk import EventRiskEngine
+
+        for side in (OutcomeSide.YES, OutcomeSide.NO):
+            for price, fair in ((8_500, 1_008), (1_550, 1_008), (5_000, 5_000)):
+                intent = self._intent(side, price, fair)
+                assert EventRiskEngine._edge_cc(intent) == _edge(intent, None), (
+                    f"gate and record disagree for {side} at {price} vs {fair}"
+                )
+
+    def test_no_fair_value_is_no_edge_rather_than_zero_edge(self):
+        from kat.common.enums import OutcomeSide
+
+        assert self._intent(OutcomeSide.NO, 8_500, None).edge_cc() is None
