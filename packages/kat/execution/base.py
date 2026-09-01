@@ -34,6 +34,7 @@ from kat.db.models import Fill as FillRow
 from kat.db.models import Order as OrderRow
 from kat.db.writer import AsyncWriter
 from kat.execution.order import ManagedOrder
+from kat.kalshi.fees import FeeSchedule, estimate_fee_micros
 from kat.kalshi.http import AmbiguousSubmission
 from kat.marketdata.book import OrderBook
 from kat.observability.logging import get_logger
@@ -65,12 +66,20 @@ class ExecutionEngine(ABC):
         kill_switches: KillSwitchManager | None = None,
         environment: TradingEnvironment = TradingEnvironment.PAPER,
         live_armed: bool = False,
+        fee_schedules: dict[str, FeeSchedule] | None = None,
     ) -> None:
         self.clock = clock
         self.writer = writer
         self.kill_switches = kill_switches
         self.environment = environment
         self.live_armed = live_armed
+        #: Per-market fee terms, keyed by ticker. Shared by reference with the
+        #: trading loop that sizes orders against this engine, so the fee used
+        #: to judge a trade and the fee charged for it cannot come from
+        #: different schedules.
+        self.fee_schedules: dict[str, FeeSchedule] = (
+            fee_schedules if fee_schedules is not None else {}
+        )
         # Working orders by our internal id. This is the in-memory book of
         # record on the trading path; the database is a durable copy of it.
         self.orders: dict[str, ManagedOrder] = {}
@@ -272,11 +281,26 @@ class ExecutionEngine(ABC):
         avg_price = (
             -(-notional // filled_qc) if is_buy else notional // filled_qc
         )
+        # Charged on what actually filled, not on ``verdict.estimated_fees_micros``.
+        # That figure is an *estimate for a decision*, priced for the quantity the
+        # strategy asked for; the risk engine then resizes, routinely by an order of
+        # magnitude. Billing the pre-resize estimate against a post-resize fill
+        # charged one 4.32-contract fill the fee for 29 contracts, and over one
+        # session paper paid $101.17 in fees on $20.92 of notional -- 484%, which
+        # silently swamps every edge the strategies were being judged on. A realised
+        # fee is computed from the fill, which is also what the live path does: there
+        # it comes from the exchange's fill payload, never from this model.
+        fee = estimate_fee_micros(
+            price_cc=avg_price,
+            qty_qc=filled_qc,
+            schedule=self.fee_schedules.get(order.ticker),
+            is_taker=True,  # a resting order returned above; this one crossed
+        )
         order.apply_fill(
             fill_id=f"paper-{order.order_id}",
             qty_qc=filled_qc,
             price_cc=avg_price,
-            fee_micros=verdict.estimated_fees_micros,
+            fee_micros=fee.fee_micros,
         )
         metrics.increment(M_ORDERS_FILLED, domain=self.market_type.value, mode="paper")
         self._persist_fill(
@@ -284,7 +308,7 @@ class ExecutionEngine(ABC):
             fill_id=f"paper-{order.order_id}",
             qty_qc=filled_qc,
             price_cc=avg_price,
-            fee_micros=verdict.estimated_fees_micros,
+            fee_micros=fee.fee_micros,
         )
 
     # -- persistence ---------------------------------------------------------

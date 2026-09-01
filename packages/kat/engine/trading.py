@@ -147,8 +147,15 @@ class TradingLoop:
         self.operating_mode: OperatingMode = OperatingMode.GATED_DISCOVERY
         #: Domain account state, supplied and refreshed by the reconciler.
         self.account_state: Any = None
-        #: Per-market fee schedules, loaded from the series metadata.
-        self.fee_schedules: dict[str, FeeSchedule] = {}
+        #: Per-market fee schedules, loaded from the series metadata. This is the
+        #: execution engine's own mapping rather than a copy: the fee that judges
+        #: a trade and the fee charged for it must come from one schedule, and two
+        #: dicts that are only *usually* equal is how they stop being. Test
+        #: doubles that implement only the submit path get their own, since there
+        #: is nothing on the other side of them to disagree with.
+        self.fee_schedules: dict[str, FeeSchedule] = getattr(
+            execution, "fee_schedules", None
+        ) or {}
         #: Model probabilities keyed by ticker, refreshed by the inference worker.
         self.model_probabilities: dict[str, tuple[float, str, str]] = {}
         #: Research/news signals keyed by ticker, already time-filtered.

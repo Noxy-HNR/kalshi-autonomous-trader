@@ -54,6 +54,7 @@ __all__ = [
     "FeeEstimate",
     "FeeSchedule",
     "estimate_fee_micros",
+    "prorate_fee_micros",
     "round_trip_fee_micros",
 ]
 
@@ -206,3 +207,28 @@ def round_trip_fee_micros(
         price_cc=exit_price_cc, qty_qc=qty_qc, schedule=schedule, is_taker=True
     )
     return entry.fee_micros + exit_.fee_micros
+
+
+def prorate_fee_micros(fee_micros: int, *, from_qty_qc: int, to_qty_qc: int) -> int:
+    """Rescale a fee estimate from one quantity to another.
+
+    A risk engine resizes an order after the fee has already been estimated for
+    the quantity the strategy asked for, and it holds a number rather than the
+    schedule that produced it, so it cannot simply recompute. It can rescale,
+    because every fee model in this module is linear in quantity: the quadratic
+    forms are ``multiplier * contracts * price * (1 - price)`` and the flat form
+    is ``multiplier * contracts``. Only the price terms are non-linear, and a
+    resize does not change the price.
+
+    That linearity is the whole justification for this function. A fee model
+    with a size-dependent rate -- a tiered or capped schedule -- would break it,
+    which is why the assumption is written down here rather than left implicit
+    at the call sites.
+
+    Rounds up, so rescaling never invents a cheaper trade than the estimate did.
+    """
+    if to_qty_qc <= 0 or fee_micros <= 0:
+        return 0
+    if from_qty_qc <= 0 or to_qty_qc >= from_qty_qc:
+        return fee_micros
+    return -(-fee_micros * to_qty_qc // from_qty_qc)

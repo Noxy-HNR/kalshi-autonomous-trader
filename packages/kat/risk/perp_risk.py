@@ -38,6 +38,7 @@ from kat.common.enums import BookSide, MarketType, RiskDecision
 from kat.common.errors import LeverageViolation
 from kat.common.fixedpoint import micros_to_decimal
 from kat.config.settings import PerpRiskSettings
+from kat.kalshi.fees import prorate_fee_micros
 from kat.kalshi.perps.models import PerpBalance, PerpRiskSnapshot
 from kat.marketdata.book import OrderBook
 from kat.observability.logging import get_logger
@@ -482,7 +483,14 @@ class PerpRiskEngine:
             ),
             checks=checks,
             leverage=final_assessment.to_dict(),
-            estimated_fees_micros=estimated_fees_micros,
+            # Restated for the size actually approved; see the note in
+            # EventRiskEngine.evaluate. A resize here is the common case, because
+            # the leverage invariant caps size far more often than it refuses.
+            estimated_fees_micros=prorate_fee_micros(
+                estimated_fees_micros,
+                from_qty_qc=intent.qty_qc,
+                to_qty_qc=approved_qty,
+            ),
             expected_slippage_cc=slippage_cc,
             current_exposure_micros=state.effective_exposure_micros(),
             projected_exposure_micros=final_assessment.projected_exposure_micros,

@@ -26,6 +26,7 @@ from decimal import Decimal
 from kat.common.enums import MarketType, OutcomeSide, RiskDecision
 from kat.common.fixedpoint import CC_PER_DOLLAR, micros_to_decimal
 from kat.config.settings import EventRiskSettings
+from kat.kalshi.fees import prorate_fee_micros
 from kat.marketdata.book import OrderBook
 from kat.observability.logging import get_logger
 from kat.observability.metrics import M_RISK_REJECTIONS, metrics
@@ -503,7 +504,15 @@ class EventRiskEngine:
                 else "approved at a reduced size to stay within event-contract risk limits"
             ),
             checks=checks,
-            estimated_fees_micros=estimated_fees_micros,
+            # Restated for the size actually approved. The caller costed the
+            # quantity the strategy asked for, and this engine routinely approves
+            # a fraction of it, so passing the original figure through reports a
+            # fee for an order that was never placed.
+            estimated_fees_micros=prorate_fee_micros(
+                estimated_fees_micros,
+                from_qty_qc=intent.qty_qc,
+                to_qty_qc=approved_qty,
+            ),
             expected_slippage_cc=slippage_cc,
             current_exposure_micros=state.total_exposure_micros(),
             projected_exposure_micros=(
