@@ -90,8 +90,8 @@ class ModelDriftStrategy(TradingStrategy):
         *LIQUIDITY_PARAM_SPACE,
         *EV_PARAM_SPACE,
         StrategyParam(
-            "min_edge_cc", 150, low=25, high=1_000, step=25,
-            description="drift must beat the touch by this much before it is worth crossing",
+            "min_edge_cc", 25, low=25, high=1_000, step=25,
+            description="floor under the cost test, for degenerate books rather than economics",
         ),
         StrategyParam(
             "min_confidence", 0.60, low=0.50, high=0.95, step=0.01,
@@ -170,6 +170,13 @@ class ModelDriftStrategy(TradingStrategy):
         # round trip is the same test at every price, and it is what decides
         # where this model can be traded at all rather than a number chosen to
         # produce trades.
+        # The cost is the bar. min_edge_cc is only a backstop against a
+        # degenerate book quoting no spread at all, and is deliberately far
+        # below the cost at any real price -- a constant set above it silently
+        # replaces the economics with a number somebody picked. At 150 it did
+        # exactly that: a 5-cent market with a 1-cent spread costs 116
+        # centicents to get out of and the model offered 142, which pays, and
+        # the constant refused it.
         cost_cc = self._round_trip_cc(mid_cc, quote.spread_cc)  # exit + fees
         floor_cc = max(self.int_param("min_edge_cc"), cost_cc)
         if edge_cc < floor_cc:
