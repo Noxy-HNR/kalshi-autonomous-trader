@@ -74,6 +74,27 @@ class _RecordingExecution:
     def working_orders(self) -> list[Any]:
         return []
 
+    # The loop refreshes the account state from these every cycle, because the
+    # risk engine's order-rate limit and pending-capital accounting have no other
+    # source. Answered from the real orders above rather than hard-coded: a stub
+    # returning a constant zero is precisely the bug those two fields had.
+    def orders_in_last_minute(self, *, now_ms: int) -> int:
+        cutoff = now_ms - 60_000
+        return sum(
+            1
+            for o in self.orders
+            if o.submitted_ts is not None and o.submitted_ts.timestamp() * 1000.0 >= cutoff
+        )
+
+    def working_exposure_micros(self) -> dict[str, int]:
+        committed: dict[str, int] = {}
+        for o in self.orders:
+            if o.exposure_qty_qc > 0 and o.limit_price_cc:
+                committed[o.ticker] = (
+                    committed.get(o.ticker, 0) + o.exposure_qty_qc * o.limit_price_cc
+                )
+        return committed
+
 
 class _NullRecorder:
     """The decision record, reduced to what the loop calls."""

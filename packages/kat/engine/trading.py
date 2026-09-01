@@ -55,6 +55,7 @@ from kat.kalshi.fees import FeeSchedule, estimate_fee_micros
 from kat.marketdata.state import MarketState, funding_rate_bps_per_hour
 from kat.observability.logging import get_logger
 from kat.observability.metrics import M_DECISION_LATENCY, M_RISK_LATENCY, metrics
+from kat.risk.event_risk import EventAccountState, EventPositionState
 from kat.risk.killswitch import KillSwitchManager
 from kat.risk.types import OrderIntent, RiskVerdict
 from kat.strategies.base import Strategy, StrategyContext
@@ -308,6 +309,7 @@ class TradingLoop:
 
         now_ms = self.clock.now_ms()
         self._mark_positions()
+        self._refresh_from_execution(now_ms)
         strategies = self.active_strategies()
         if not strategies:
             result.duration_ms = (time.monotonic() - started) * 1000
@@ -554,6 +556,58 @@ class TradingLoop:
             total += value
 
         self.account_state.portfolio_value_micros = total
+
+    def _refresh_from_execution(self, now_ms: int) -> None:
+        """Put onto the account state the two facts only execution knows.
+
+        The event risk engine reads ``orders_this_minute`` and each position's
+        ``pending_exposure_micros``, and until now nothing outside the backtester
+        ever wrote either. Both sat at their defaults of zero on every live and
+        paper evaluation, so ``max_orders_per_minute`` compared ``0 < 30`` and
+        could not fire, and capital already promised to resting orders counted
+        for nothing against the cash and concentration limits.
+
+        Both defaults read as "nothing pending, nothing submitted", which is the
+        most permissive answer either field has -- the opposite of this
+        platform's posture everywhere else, where what cannot be established is
+        refused rather than assumed favourable. The backtester filled both in,
+        so it enforced limits the live engine did not, and a backtest was
+        measuring a stricter platform than the one that would trade.
+
+        Observed: 55 good-till-cancelled orders on one market in 55 seconds,
+        about twice the configured rate limit, none of them filling, none of them
+        counted against capital, and none refused.
+
+        A ticker with working orders but no position gets an entry so its
+        commitment reaches the portfolio total. That entry holds no contracts, so
+        it does not inflate the open-position count, which reads ``position_qc``.
+        """
+        state = self.account_state
+        # Named rather than duck-typed: these two fields belong to the
+        # event-contract account state. Perpetuals express both ideas through the
+        # leverage invariant, on a state object that deliberately shares no base
+        # class with this one, so there is nothing here to generalise over.
+        if state is None or self.market_type is not MarketType.EVENT:
+            return
+        if not isinstance(state, EventAccountState):
+            return
+
+        state.orders_this_minute = self.execution.orders_in_last_minute(now_ms=now_ms)
+
+        committed = self.execution.working_exposure_micros()
+        for ticker, micros in committed.items():
+            position = state.positions.get(ticker)
+            if position is None:
+                snapshot = self.market_state.get(ticker)
+                position = EventPositionState(
+                    ticker=ticker,
+                    event_ticker=(snapshot.event_ticker if snapshot else "") or "",
+                )
+                state.positions[ticker] = position
+            position.pending_exposure_micros = micros
+        for ticker, position in state.positions.items():
+            if ticker not in committed:
+                position.pending_exposure_micros = 0
 
     def _apply_paper_fill(self, intent: OrderIntent, order: Any) -> None:
         """Book a simulated fill against the local account.

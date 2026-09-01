@@ -188,6 +188,46 @@ class ExecutionEngine(ABC):
     def find_by_client_order_id(self, client_order_id: str) -> ManagedOrder | None:
         return self._by_client_id.get(client_order_id)
 
+    def orders_in_last_minute(self, *, now_ms: int) -> int:
+        """How many orders this engine has submitted in the last sixty seconds.
+
+        The event risk engine compares this against ``max_orders_per_minute`` and
+        calls the rejection "runaway-order protection engaged". Nothing outside
+        the backtester ever supplied the number, so the field sat at its default
+        of zero and the comparison was ``0 < 30`` on every evaluation: the limit
+        could not fire, in paper or in live.
+
+        It was not idle protection. A strategy re-proposing the same trade every
+        cycle submitted 55 good-till-cancelled orders in 55 seconds against one
+        market -- roughly double the configured limit -- and nothing objected.
+        """
+        cutoff = now_ms - 60_000
+        count = 0
+        for order in self.orders.values():
+            submitted = order.submitted_ts
+            if submitted is None:
+                continue
+            if submitted.timestamp() * 1000.0 >= cutoff:
+                count += 1
+        return count
+
+    def working_exposure_micros(self) -> dict[str, int]:
+        """Capital committed to still-working orders, keyed by ticker.
+
+        ``qty_qc * price_cc`` is already micros -- 1e-2 contracts times 1e-4 USD
+        -- so no conversion belongs here. The platform only ever buys an outcome,
+        so the limit price is the cost per contract and also the most that
+        contract can lose, which is what makes this a sound exposure figure.
+        """
+        committed: dict[str, int] = {}
+        for order in self.orders.values():
+            remaining = order.exposure_qty_qc
+            price = order.limit_price_cc
+            if remaining <= 0 or not price:
+                continue
+            committed[order.ticker] = committed.get(order.ticker, 0) + remaining * price
+        return committed
+
     # -- dispatch ------------------------------------------------------------
 
     async def _dispatch(self, order: ManagedOrder, verdict: RiskVerdict) -> None:
