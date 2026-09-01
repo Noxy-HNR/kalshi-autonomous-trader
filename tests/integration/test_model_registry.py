@@ -255,10 +255,17 @@ class TestServingFindsWhatWasDeployed:
     async def test_nothing_deployed_is_none_not_an_error(self, registry):
         assert await registry.deployed(MarketType.EVENT) is None
 
-    async def test_the_newest_deployment_wins_when_targets_differ(
+    async def test_deploying_archives_the_previous_model_whatever_its_target(
         self, registry, trained_models
     ):
-        """A domain with two deployed targets serves the latest rather than failing."""
+        """One deployed model per domain.
+
+        Inference publishes one probability per market for the whole domain, so
+        two deployed models is not two channels -- it is an ambiguity about which
+        is being served. Archiving per target left a forward_move_30m model
+        deployed alongside its own replacement under forward_move_30m_200cc, and
+        the serving path chose between them on a timestamp.
+        """
         first = await registry.register(
             usable(trained_models)[0], market_type=MarketType.EVENT, target="forward_move_30m"
         )
@@ -271,3 +278,7 @@ class TestServingFindsWhatWasDeployed:
         found = await registry.deployed(MarketType.EVENT)
         assert found is not None
         assert found.target == "forward_move_60m"
+
+        # And the first one is no longer claiming to be deployed.
+        stale = await registry.load(first.model_id, first.version)
+        assert stale.deployment_state != DeploymentState.DEPLOYED

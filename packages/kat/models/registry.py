@@ -251,16 +251,24 @@ class ModelRegistry:
         loaded = await self.load(model_id, version)
 
         async with self.db.session() as session:
+            # Archived per *domain*, not per target. The inference engine
+            # publishes one probability per market for the whole domain, so two
+            # deployed models is not two channels -- it is an ambiguity about
+            # which one is being served. Scoping this by target left a
+            # forward_move_30m model deployed alongside its own replacement under
+            # forward_move_30m_200cc, and the serving path picked between them on
+            # a timestamp.
             incumbents = (
                 await session.execute(
                     select(ModelRow).where(
                         ModelRow.market_type == loaded.market_type.value,
-                        ModelRow.target == loaded.target,
                         ModelRow.deployment_state == DeploymentState.DEPLOYED,
                     )
                 )
             ).scalars().all()
             for row in incumbents:
+                if (row.model_id, row.version) == (model_id, version):
+                    continue
                 row.deployment_state = DeploymentState.ARCHIVED
                 log.info(
                     "model.archived",
