@@ -46,6 +46,7 @@ from kat.engine.ingestion import (
     select_perp_watchlist,
 )
 from kat.engine.lifecycle import Application, Phase, ServiceComponent
+from kat.engine.persistence import restore_event_account, snapshot_event_account
 from kat.engine.trading import TradingLoop
 from kat.execution.event_exec import EventExecutionEngine
 from kat.execution.perp_exec import PerpExecutionEngine
@@ -564,6 +565,11 @@ class Platform:
         self.app.register(
             ServiceComponent("risk-overrides", start=self._restore_risk_overrides)
         )
+        self.app.register(
+            ServiceComponent(
+                "account-snapshot", run=self._snapshot_paper_account, critical=False
+            )
+        )
 
         for market_type, loop in self.context.loops.items():
             if market_type is MarketType.PERP and not self.perps_enabled:
@@ -673,6 +679,59 @@ class Platform:
         else:
             if self.arbitrage is not None:
                 self.arbitrage.fee_schedules = loop.fee_schedules
+
+    async def restore_paper_account(self) -> None:
+        """Put back the paper account this process last recorded.
+
+        Runs after build_trading(), which is the first moment both the account
+        state and the database exist. Seeding stays the fallback: an account that
+        cannot be recovered is started fresh rather than started wrong.
+        """
+        settings = self.settings
+        if settings.environment is not TradingEnvironment.PAPER:
+            return
+        loop = self.context.loops.get(MarketType.EVENT)
+        if loop is None or self.app.database is None:
+            return
+
+        state, detail = await restore_event_account(
+            self.app.database,
+            environment=settings.environment,
+            now=self.clock.now(),
+            seed_micros=parse_dollars_micros(settings.paper_starting_balance_usd),
+        )
+        if state is None:
+            log.info("paper.account_seeded", **detail)
+            return
+
+        loop.account_state = state
+        log.info("paper.account_restored", **detail)
+
+    async def _snapshot_paper_account(self) -> None:
+        """Record the account periodically, so a restart has something to find.
+
+        Every thirty seconds rather than only at shutdown: the shutdown that
+        matters is the one that does not run any Python -- the machine sleeping,
+        the OS killing the process, the power going -- and none of those reach a
+        stop hook. Thirty seconds bounds how much of the record a hard kill can
+        take with it.
+        """
+        loop = self.context.loops.get(MarketType.EVENT)
+        while True:
+            await asyncio.sleep(30.0)
+            state = loop.account_state if loop is not None else None
+            if not isinstance(state, EventAccountState):
+                continue
+            try:
+                snapshot_event_account(
+                    state,
+                    writer=self.app.writer,
+                    environment=self.settings.environment,
+                    now=self.clock.now(),
+                )
+            except Exception as exc:
+                # Recording the account must never be able to stop it trading.
+                log.warning("paper.snapshot_failed", error=str(exc))
 
     def _scan_arbitrage(self, now_ms: int) -> list[Any]:
         """One arbitrage pass, converted to intents.
@@ -1004,6 +1063,7 @@ async def run(settings: AppSettings | None = None) -> int:
         await platform.app._load_persisted_state()
 
         platform.build_trading()
+        await platform.restore_paper_account()
 
         platform.register_components()
         report = await platform.app.start()
