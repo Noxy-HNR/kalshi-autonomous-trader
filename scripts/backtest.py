@@ -91,6 +91,7 @@ class DeployedModelProvider:
             model_id=self.model.model_id,
             model_version=self.model.version,
             target=self.model.target,
+            base_rate=self.model.base_rate,
         )
 
 
@@ -202,6 +203,14 @@ async def main() -> int:
              "not to make a bad market look tradeable.",
     )
     parser.add_argument(
+        "--min-edge-cc",
+        type=int,
+        default=None,
+        help="override the risk engine's edge bar FOR THIS RUN, to measure what "
+             "trades below it would have done. Never a reason to change the "
+             "shipped default, which exists because those trades lost money.",
+    )
+    parser.add_argument(
         "--no-model",
         action="store_true",
         help="run without the deployed model, to see what the rest does alone",
@@ -239,7 +248,14 @@ async def main() -> int:
             print(f"  model    {model.key} target={model.target}")
             model_provider = DeployedModelProvider(model, features)
 
+    # An experiment knob, not a production setting. The shipped min_edge_cc is
+    # 200 and stays there; this exists so a run can ask "what would these trades
+    # have done if the bar had let them through" and get a number instead of an
+    # opinion. Answering that is the whole point of a backtester.
     risk = EventRiskSettings()
+    if args.min_edge_cc is not None:
+        risk = EventRiskSettings(min_edge_cc=args.min_edge_cc)
+        print(f"  EXPERIMENT: min_edge_cc lowered to {args.min_edge_cc} for this run only")
     engine = BacktestEngine(
         feed=feed,
         strategies=strategies,

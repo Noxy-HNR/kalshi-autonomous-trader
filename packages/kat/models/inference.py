@@ -327,6 +327,7 @@ class InferenceEngine:
             # place: no model means no view, and the loop must see that.
             loop.model_probabilities = {}
             loop.model_target = None
+            loop.model_base_rate = None
             return 0
 
         self.score(vectors, now_ms)
@@ -335,6 +336,9 @@ class InferenceEngine:
         # Published beside the numbers, because a probability whose subject is
         # unknown cannot be used safely by anything downstream.
         loop.model_target = self.model.target if self.model else None
+        # From the test split, which is the honest estimate of how often the
+        # event actually happens.
+        loop.model_base_rate = self.model.base_rate if self.model else None
         return len(entries)
 
     async def run(self, loop: Any, *, interval_s: float = 5.0) -> None:

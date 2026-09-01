@@ -173,10 +173,17 @@ class StrategyContext:
     #: target. A strategy that reads the number without checking this is not
     #: reading a probability, it is reading a float.
     model_target: str | None = None
+    #: The unconditional rate of that event. A rare-event probability is not
+    #: centred on a half, so this is the neutral point a directional reading has
+    #: to be taken against.
+    model_base_rate: float | None = None
     model_id: str | None = None
     model_version: str | None = None
     # Current signed position in this market, in centi-contracts.
     position_qc: int = 0
+    #: How long the current position has been held, or None when flat or
+    #: unknown. A forecast with a horizon is only actionable for that horizon.
+    position_age_ms: int | None = None
     # Detected regime, when regime detection is running.
     regime: str | None = None
     # Relevant news/research signals, already time-filtered.

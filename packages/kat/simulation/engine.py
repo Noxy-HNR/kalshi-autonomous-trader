@@ -542,6 +542,10 @@ class ModelPrediction:
     #: number without this is not reading a probability, it is reading a float --
     #: and a backtest that omits it measures a strategy standing aside.
     target: str | None = None
+    #: The unconditional rate of the event this model predicts. Without it a
+    #: rare-event probability read against a 0.5 prior is a constant, not a
+    #: signal: at a 2.4% base rate every output is below a half.
+    base_rate: float | None = None
 
 
 FeatureProvider = Callable[[str, int], "Sequence[TimedFeature] | FeatureVector | None"]
@@ -1459,6 +1463,7 @@ class BacktestEngine:
                     features[tf.name] = tf.value
 
         probability = model_id = model_version = model_target = None
+        model_base_rate = None
         if self._model_provider is not None:
             prediction = self._model_provider(snap.ticker, now_ms)
             if prediction is not None:
@@ -1472,6 +1477,7 @@ class BacktestEngine:
                 model_id = prediction.model_id
                 model_version = prediction.model_version
                 model_target = prediction.target
+                model_base_rate = prediction.base_rate
                 self.predictions.append(
                     PredictionRecord(
                         ticker=snap.ticker, ts_ms=now_ms, probability=probability,
@@ -1480,9 +1486,12 @@ class BacktestEngine:
                 )
 
         position_qc = 0
+        position_age_ms: int | None = None
         if self.config.market_type is MarketType.EVENT:
             pos = self.event_ledger.positions.get(snap.ticker)
             position_qc = pos.qty_qc if pos else 0
+            if pos is not None and pos.qty_qc and pos.opened_ms:
+                position_age_ms = max(0, now_ms - pos.opened_ms)
         else:
             perp_pos = self.perp_ledger.positions.get(snap.ticker)
             position_qc = perp_pos.qty_qc if perp_pos else 0
@@ -1493,9 +1502,11 @@ class BacktestEngine:
             features=features,
             model_probability=probability,
             model_target=model_target,
+            model_base_rate=model_base_rate,
             model_id=model_id,
             model_version=model_version,
             position_qc=position_qc,
+            position_age_ms=position_age_ms,
             fee_multiplier=self.config.fee_multiplier,
             # Supplied here for the same reason it is supplied live: on a delta
             # feed, silence on one market means the book has not changed, and

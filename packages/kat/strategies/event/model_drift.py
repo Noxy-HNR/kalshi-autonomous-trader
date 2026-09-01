@@ -18,9 +18,18 @@ The model answers "will the mid rise by more than ``T`` centicents in the next
 conservative one is symmetry: treat a miss as an adverse move of the same size
 the hit would have gained. Expected drift is then::
 
-    drift = T * p - T * (1 - p) = T * (2p - 1)
+    drift = T * (p - base) / (1 - base)   when p is above the base rate
+    drift = T * (p - base) / base         when it is below
 
-At ``p = 0.5`` that is zero, which is the right answer for a model with no view.
+At ``p = base_rate`` that is zero, which is the right answer for a model saying
+nothing beyond what is already known.
+
+The base rate, not a half, is the neutral point. A half is neutral only for a
+balanced target; this model's event happens 2.4% of the time, so every
+probability it emits is below a half and reading it against 0.5 made ``2p - 1``
+permanently near -1 -- a constant "sell" wearing the costume of a signal. It
+produced 37 completed round trips in a week, every one short, and a win rate of
+exactly zero.
 It is deliberately pessimistic -- a miss is usually a small move rather than a
 full adverse ``T`` -- because a fair value that overstates the edge is how a
 strategy talks itself into paying the spread.
@@ -68,10 +77,12 @@ from kat.strategies.proposal import (
 __all__ = ["ModelDriftStrategy"]
 
 _SKIP_NO_MODEL = "no_model_probability"
+_SKIP_NO_BASE_RATE = "model_reports_no_base_rate"
 _SKIP_WRONG_TARGET = "model_answers_a_different_question"
 _SKIP_NO_VIEW = "model_has_no_directional_view"
 _SKIP_EDGE_TOO_SMALL = "drift_below_threshold"
 _SKIP_PRICE_BAND = "price_outside_band"
+_SKIP_NEAR_BOUND = "too_close_to_a_bound_for_the_sign_to_mean_anything"
 _SKIP_HOLDING = "holding_while_the_view_stands"
 
 #: Targets this strategy can read: a forward move over a horizon, with the
@@ -135,10 +146,28 @@ class ModelDriftStrategy(TradingStrategy):
         if threshold_cc is None:
             return self.skip(_SKIP_WRONG_TARGET)
 
-        # Distance from a coin flip, not the probability itself: a model saying
-        # 0.5 has no view, and one saying 0.02 has a strong view in the other
-        # direction.
-        conviction = abs(probability - 0.5) * 2.0
+        # Judged against how often the event actually happens, not against a
+        # coin flip.
+        #
+        # A half is the neutral point only for a balanced target. This model's
+        # event happens 2.4% of the time, so *every* probability it emits is
+        # below a half, and reading it against 0.5 makes 2p-1 permanently near
+        # -1. The strategy was not weakly bearish, it was a constant: 37
+        # completed round trips in a week, every one short, a win rate of
+        # exactly zero, and the fees to re-enter that non-view every thirty
+        # minutes.
+        #
+        # Above the base rate is bullish, below it bearish, each normalised by
+        # the room available on that side so both directions can reach full
+        # conviction.
+        base_rate = ctx.model_base_rate
+        if base_rate is None or not 0.0 < base_rate < 1.0:
+            return self.skip(_SKIP_NO_BASE_RATE)
+        if probability >= base_rate:
+            signal = (probability - base_rate) / (1.0 - base_rate)
+        else:
+            signal = (probability - base_rate) / base_rate
+        conviction = abs(signal)
         if conviction < (self.float_param("min_confidence") - 0.5) * 2.0:
             return self.skip(_SKIP_NO_VIEW)
 
@@ -154,7 +183,27 @@ class ModelDriftStrategy(TradingStrategy):
         if not self.int_param("min_price_cc") <= mid_cc <= self.int_param("max_price_cc"):
             return self.skip(_SKIP_PRICE_BAND)
 
-        drift_cc = int(threshold_cc * (2.0 * probability - 1.0))
+        # Near a bound the probability is not a directional view.
+        #
+        # The model answers "will the mid rise by T". A contract at 96 cents is
+        # four cents from the ceiling, so it can barely rise by 200 centicents
+        # whatever happens next, and the model correctly reports a probability
+        # near zero. Read against a symmetric 0.5 prior that becomes maximum
+        # bearish conviction -- and it is nothing of the kind, it is arithmetic
+        # about where the price sits.
+        #
+        # Measured: without this the strategy shorted the same two 96-cent
+        # markets every thirty minutes for a week. 37 completed round trips, a
+        # win rate of exactly zero, -7.2% and a Sharpe of -47, with more than
+        # half the loss in fees paid to re-enter a view that was never a view.
+        #
+        # Comparing p to 0.5 is only meaningful where a move of T is genuinely
+        # available in both directions with room to spare.
+        headroom_cc = 2 * threshold_cc
+        if not headroom_cc <= mid_cc <= CC_PER_DOLLAR - headroom_cc:
+            return self.skip(_SKIP_NEAR_BOUND)
+
+        drift_cc = int(threshold_cc * signal)
         fair_value_cc = clamp_price_cc(mid_cc + drift_cc)
 
         # Exits come first, and they come before the cost test.
@@ -263,8 +312,20 @@ class ModelDriftStrategy(TradingStrategy):
 
         holding_yes = position_qc > 0
         drift_up = drift_cc > 0
-        if holding_yes == drift_up:
-            # The view that opened this still stands.
+        reversed_view = holding_yes != drift_up
+
+        # A forecast expires. The model was asked what happens over one horizon,
+        # so once that horizon has passed the position is being held on nothing
+        # -- and on this data the view almost never reverses, because the
+        # probability sits stably near its base rate. Without the clock the
+        # reversal test alone closed nothing at all.
+        horizon_ms = self._horizon_ms(ctx.model_target)
+        age_ms = ctx.position_age_ms
+        expired = (
+            horizon_ms is not None and age_ms is not None and age_ms >= horizon_ms
+        )
+
+        if not reversed_view and not expired:
             return None
 
         side = OutcomeSide.NO if holding_yes else OutcomeSide.YES
@@ -286,12 +347,14 @@ class ModelDriftStrategy(TradingStrategy):
                 qty_qc=abs(position_qc),
                 schedule=fee_schedule_for(ctx),
             ),
-            reason="model_drift_reversed",
+            reason="model_drift_exit",
             extra={
                 "model_probability": round(ctx.model_probability or 0.0, 6),
                 "model_target": ctx.model_target,
                 "held_qc": position_qc,
                 "drift_cc": drift_cc,
+                "held_ms": age_ms,
+                "closed_because": "reversed" if reversed_view else "horizon_expired",
             },
         )
         intent.reduce_only = True
@@ -314,6 +377,21 @@ class ModelDriftStrategy(TradingStrategy):
         fee_micros = realised_fee_micros(price_cc=mid_cc, qty_qc=QC_PER_CONTRACT)
         # micros to centicents: 1e-6 USD against 1e-4 USD.
         return spread_cc // 2 + 2 * (fee_micros // 100)
+
+    @staticmethod
+    def _horizon_ms(target: str | None) -> int | None:
+        """How far ahead the model was asked to see, from its own target.
+
+        A forecast is only actionable for as long as it forecasts. Holding a
+        30-minute view for a week is not the strategy the model was trained for,
+        and it is what turned this one into an accumulator: replayed over a week
+        it opened 36 positions, closed none, and finished down 0.59% -- almost
+        all of it fees and marks on trades whose forecast had long since expired.
+        """
+        if not target:
+            return None
+        match = _TARGET.match(target)
+        return int(match.group(1)) * 60_000 if match else None
 
     @staticmethod
     def _threshold_cc(target: str | None) -> int | None:

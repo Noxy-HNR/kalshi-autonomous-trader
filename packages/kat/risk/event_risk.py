@@ -53,6 +53,10 @@ class EventPositionState:
     exposure_micros: int = 0
     pending_exposure_micros: int = 0
     unrealized_pnl_micros: int = 0
+    #: When this position was opened. A strategy trading a forecast with a
+    #: horizon has to know how much of that horizon has elapsed, and the
+    #: backtester's own ledger has tracked this from the start.
+    opened_at_ms: int = 0
 
     @property
     def max_loss_micros(self) -> int:
@@ -107,6 +111,11 @@ class EventAccountState:
         if position is None:
             position = EventPositionState(ticker=ticker, event_ticker=event_ticker)
             self.positions[ticker] = position
+        if position.position_qc == 0:
+            # Opening from flat, so the clock on this position starts now. Adding
+            # to an existing position leaves it alone: the horizon belongs to the
+            # forecast that opened it.
+            position.opened_at_ms = now_ms
         if event_ticker and not position.event_ticker:
             position.event_ticker = event_ticker
 

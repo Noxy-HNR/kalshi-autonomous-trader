@@ -70,6 +70,10 @@ class RegisteredModel:
     deployment_state: str = DeploymentState.CANDIDATE
     estimator: Any = None
     calibrator: Any = None
+    #: How often the modelled event actually happened on the test split. A
+    #: consumer reading a rare-event probability against a 0.5 prior is reading
+    #: a constant, so this travels with the model like the target does.
+    base_rate: float | None = None
 
     @property
     def key(self) -> str:
@@ -238,6 +242,7 @@ class ModelRegistry:
             deployment_state=row.deployment_state,
             estimator=payload["estimator"],
             calibrator=payload.get("calibrator"),
+            base_rate=(row.test_metrics or {}).get("base_rate"),
         )
 
     # -- deployment ----------------------------------------------------------

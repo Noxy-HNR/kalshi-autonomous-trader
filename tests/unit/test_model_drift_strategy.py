@@ -23,7 +23,13 @@ from kat.strategies.event.model_drift import ModelDriftStrategy
 NOW_MS = 1_000_000
 
 
-def _ctx(*, probability: float, target: str | None, mid_cc: int = 5_000) -> StrategyContext:
+def _ctx(
+    *,
+    probability: float,
+    target: str | None,
+    mid_cc: int = 5_000,
+    base_rate: float = 0.024,
+) -> StrategyContext:
     book = OrderBook.from_event_contract_levels(
         "X",
         yes_levels=[(mid_cc - 50, 500_000)],
@@ -38,6 +44,7 @@ def _ctx(*, probability: float, target: str | None, mid_cc: int = 5_000) -> Stra
         features={},
         model_probability=probability,
         model_target=target,
+        model_base_rate=base_rate,
         model_id="m",
         model_version="v",
         feed_live=True,
@@ -83,15 +90,35 @@ class TestItOnlyReadsTargetsItUnderstands:
 
 
 class TestTheDriftIsSignedAndConservative:
-    def test_a_coin_flip_produces_no_view(self):
-        """p = 0.5 is no information, and must not become a trade."""
+    def test_the_base_rate_produces_no_view(self):
+        """Saying exactly what is already known is not information.
+
+        A half is neutral only for a balanced target. This model's event happens
+        2.4% of the time, so reading it against 0.5 made every output a strong
+        sell -- 37 round trips in a week, all short, zero winners.
+        """
         s = ModelDriftStrategy()
-        assert s.generate(_ctx(probability=0.5, target="forward_move_30m_200cc")) == []
+        assert s.generate(_ctx(probability=0.024, target="forward_move_30m_200cc")) == []
         assert _skip(s) == "model_has_no_directional_view"
+
+    def test_a_coin_flip_is_bullish_against_a_rare_event(self):
+        """p = 0.5 against a 2.4% base rate is a very strong upward view, and
+        must not be read as neutral."""
+        s = ModelDriftStrategy()
+        s.generate(_ctx(probability=0.5, target="forward_move_30m_900cc", mid_cc=5_000))
+        assert _skip(s) != "model_has_no_directional_view"
+
+    def test_no_base_rate_is_refused(self):
+        """Without it the probability cannot be read directionally at all."""
+        s = ModelDriftStrategy()
+        ctx = _ctx(probability=0.9, target="forward_move_30m_200cc")
+        ctx.model_base_rate = None
+        assert s.generate(ctx) == []
+        assert _skip(s) == "model_reports_no_base_rate"
 
     def test_a_weak_view_is_refused(self):
         s = ModelDriftStrategy()
-        assert s.generate(_ctx(probability=0.55, target="forward_move_30m_200cc")) == []
+        assert s.generate(_ctx(probability=0.03, target="forward_move_30m_200cc")) == []
         assert _skip(s) == "model_has_no_directional_view"
 
     def test_a_confident_upward_view_buys_yes(self):
@@ -108,7 +135,7 @@ class TestTheDriftIsSignedAndConservative:
         from kat.common.enums import OutcomeSide
 
         s = ModelDriftStrategy()
-        intents = s.generate(_ctx(probability=0.03, target="forward_move_30m_900cc"))
+        intents = s.generate(_ctx(probability=0.0005, target="forward_move_30m_900cc"))
 
         assert intents, f"expected an intent, skipped with {_skip(s)}"
         assert intents[0].outcome_side is OutcomeSide.NO
@@ -170,7 +197,7 @@ class TestTheEdgeMustCoverWhatCapturingItCosts:
         """Where the fee is small, the same drift clears its cost."""
         s = ModelDriftStrategy()
         intents = s.generate(
-            _ctx(probability=0.999, target="forward_move_30m_900cc", mid_cc=9_400)
+            _ctx(probability=0.999, target="forward_move_30m_900cc", mid_cc=7_800)
         )
         assert intents, f"expected an intent, skipped with {_skip(s)}"
 

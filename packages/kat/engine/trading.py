@@ -165,6 +165,9 @@ class TradingLoop:
         #: The deployed model's target, published beside the probabilities. The
         #: same for every ticker, so it is not repeated in each entry.
         self.model_target: str | None = None
+        #: How often the modelled event actually happens, so a rare-event
+        #: probability is read against the right neutral point.
+        self.model_base_rate: float | None = None
         #: Research/news signals keyed by ticker, already time-filtered.
         self.research: dict[str, dict[str, Any]] = {}
         #: Cross-market intent producers; see :meth:`add_intent_source`.
@@ -701,9 +704,11 @@ class TradingLoop:
             features=self.features.get(snapshot.ticker, {}),
             model_probability=probability[0] if probability else None,
             model_target=self.model_target,
+            model_base_rate=self.model_base_rate,
             model_id=probability[1] if probability else None,
             model_version=probability[2] if probability else None,
             position_qc=self._position_qc(snapshot.ticker),
+            position_age_ms=self._position_age_ms(snapshot.ticker, now_ms),
             regime=self.regimes.get(snapshot.ticker),
             research=self.research.get(snapshot.ticker, {}),
             fee_multiplier=(
@@ -735,6 +740,17 @@ class TradingLoop:
         """
         age = self.market_state.feed_age_ms(now_ms=now_ms)
         return age is not None and age <= self.market_state.feed_max_age_ms
+
+    def _position_age_ms(self, ticker: str, now_ms: int) -> int | None:
+        """How long the position in ``ticker`` has been open, or None."""
+        state = self.account_state
+        if state is None:
+            return None
+        position = getattr(state, "positions", {}).get(ticker)
+        opened = getattr(position, "opened_at_ms", 0) if position else 0
+        if not opened or not getattr(position, "position_qc", 0):
+            return None
+        return max(0, now_ms - opened)
 
     def _position_qc(self, ticker: str) -> int:
         state = self.account_state
