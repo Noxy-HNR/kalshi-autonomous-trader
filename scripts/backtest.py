@@ -40,12 +40,14 @@ from kat.strategies.event.expiry_drift import ExpiryDriftStrategy
 from kat.strategies.event.mean_reversion import MeanReversionStrategy
 from kat.strategies.event.model_drift import ModelDriftStrategy
 from kat.strategies.event.momentum import MomentumStrategy
+from kat.strategies.event.passive_quote import PassiveQuoteStrategy
 
 STRATEGIES = {
     "mean_reversion": MeanReversionStrategy,
     "momentum": MomentumStrategy,
     "expiry_drift": ExpiryDriftStrategy,
     "model_drift": ModelDriftStrategy,
+    "passive_quote": PassiveQuoteStrategy,
 }
 
 
