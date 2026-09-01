@@ -474,6 +474,12 @@ class AppSettings(BaseSettings):
     # times the websocket ping interval, so an idle overnight feed never trips
     # it, and far inside the websocket's own silence timeout.
     feed_silence_max_age_ms: int = Field(default=60_000, ge=1_000, le=600_000)
+    # How long an unfilled limit order may rest before it is cancelled. A
+    # strategy re-prices every cycle, so an order still resting after this has
+    # been superseded by its own author -- and a stale limit does not merely fail
+    # to fill, it fills exactly when the price crosses it, which is when the
+    # market has moved against the opinion that placed it.
+    order_ttl_s: float = Field(default=60.0, ge=5.0, le=3_600.0)
     # Account state older than this forces a reconciliation before trading.
     max_account_state_age_ms: int = Field(default=30_000, ge=1_000, le=600_000)
     # Startup reconciliation must succeed within this budget or we stay halted.

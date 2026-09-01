@@ -131,6 +131,7 @@ class TradingLoop:
         kill_switches: KillSwitchManager | None = None,
         interval_s: float = 1.0,
         max_intents_per_cycle: int = 20,
+        order_ttl_ms: int = 60_000,
     ) -> None:
         self.market_type = market_type
         self.market_state = market_state
@@ -141,6 +142,8 @@ class TradingLoop:
         self.kill_switches = kill_switches
         self.interval_s = interval_s
         self.max_intents_per_cycle = max_intents_per_cycle
+        #: How long an unfilled order may rest before the loop cancels it.
+        self.order_ttl_ms = order_ttl_ms
 
         self.strategies: list[Strategy] = []
         #: Set by the owning application; the loop consults it every cycle.
@@ -308,6 +311,11 @@ class TradingLoop:
             return result
 
         now_ms = self.clock.now_ms()
+        # Before anything is measured: a cancelled order releases the market's
+        # headroom, and the refresh below is what tells risk about it.
+        await self.execution.expire_stale_orders(
+            now_ms=now_ms, ttl_ms=self.order_ttl_ms
+        )
         self._mark_positions()
         self._refresh_from_execution(now_ms)
         strategies = self.active_strategies()

@@ -179,6 +179,51 @@ class ExecutionEngine(ABC):
         )
         return sum(1 for r in results if r is True)
 
+    async def expire_stale_orders(self, *, now_ms: int, ttl_ms: int) -> int:
+        """Cancel working orders that have rested longer than ``ttl_ms``.
+
+        These are good-till-cancelled limit orders priced off a book that has
+        since moved, and nothing was ever cancelling them. Two things follow from
+        leaving them, and both are bad.
+
+        The first is that a resting order holds its market's position headroom
+        for as long as it rests, because pending exposure counts against the
+        concentration cap exactly as a holding does. Nothing released it, so
+        every market the platform touched became permanently unavailable to it --
+        observed as ``POSITION_LIMIT`` on markets holding no position at all,
+        while the account still had five sixths of its cash.
+
+        The second is worse than idleness. A stale limit does not simply fail to
+        fill: it fills precisely when the market crosses it, which is when the
+        price has moved against the opinion that placed it. Leaving it resting
+        turns a cancelled idea into a standing offer to be picked off.
+
+        A strategy re-prices every cycle, so an order that has not filled within
+        the TTL has been superseded by its own author.
+        """
+        cutoff = now_ms - ttl_ms
+        stale = [
+            order
+            for order in list(self.orders.values())
+            if order.is_working
+            and order.submitted_ts is not None
+            and order.submitted_ts.timestamp() * 1000.0 < cutoff
+        ]
+        if not stale:
+            return 0
+        results = await asyncio.gather(
+            *(self.cancel(o.order_id) for o in stale), return_exceptions=True
+        )
+        cancelled = sum(1 for r in results if r is True)
+        if cancelled:
+            log.info(
+                "execution.stale_orders_expired",
+                domain=self.market_type.value,
+                cancelled=cancelled,
+                ttl_ms=ttl_ms,
+            )
+        return cancelled
+
     def working_orders(self, *, ticker: str | None = None) -> list[ManagedOrder]:
         return [
             o for o in self.orders.values()

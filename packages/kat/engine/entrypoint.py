@@ -301,6 +301,7 @@ class Platform:
             recorder=DecisionRecorder(writer, **recorder_kwargs),
             clock=self.clock,
             kill_switches=self.app.kill_switches,
+            order_ttl_ms=int(settings.order_ttl_s * 1000),
         )
         perp_loop = TradingLoop(
             market_type=MarketType.PERP,
@@ -312,6 +313,7 @@ class Platform:
             recorder=DecisionRecorder(writer, **recorder_kwargs),
             clock=self.clock,
             kill_switches=self.app.kill_switches,
+            order_ttl_ms=int(settings.order_ttl_s * 1000),
         )
 
         # Paper mode has no exchange account, so seed a starting balance from

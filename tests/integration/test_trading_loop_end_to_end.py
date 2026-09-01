@@ -74,6 +74,10 @@ class _RecordingExecution:
     def working_orders(self) -> list[Any]:
         return []
 
+    async def expire_stale_orders(self, *, now_ms: int, ttl_ms: int) -> int:
+        """Nothing rests here: every order this double accepts fills at once."""
+        return 0
+
     # The loop refreshes the account state from these every cycle, because the
     # risk engine's order-rate limit and pending-capital accounting have no other
     # source. Answered from the real orders above rather than hard-coded: a stub
