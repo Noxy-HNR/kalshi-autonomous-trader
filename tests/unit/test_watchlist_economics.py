@@ -114,3 +114,51 @@ class TestTheThresholdsAreSane:
     def test_the_volume_floor_admits_a_small_account(self):
         """Fifty contracts a day, not a deep book."""
         assert 0 < _MIN_WATCH_VOLUME_QC <= 50_000
+
+
+class TestVolatilityFallsBackToTheWindowThisVenueSupports:
+    """``realized_vol_5m_cc`` needs four bar-to-bar changes inside fifteen
+    minutes, which assumes a market that reprices continuously.
+
+    Kalshi event contracts reprice a few times an hour. Of sixty watched
+    markets, eight cleared that bar, and ``realized_vol_unavailable`` was the
+    single largest reason the platform declined to trade -- 76,644 refusals
+    across a thousand cycles. The hour-long window is the same statistic over
+    more data, so it is a substitute rather than a fudge.
+    """
+
+    @staticmethod
+    def _ctx(features):
+        from kat.common.enums import MarketType
+        from kat.marketdata.state import MarketSnapshot
+        from kat.strategies.base import StrategyContext
+
+        return StrategyContext(
+            now_ms=0,
+            market=MarketSnapshot(ticker="X", market_type=MarketType.EVENT),
+            features=features,
+        )
+
+    def test_the_short_window_is_preferred(self):
+        from kat.strategies.common import per_bar_volatility_cc
+
+        ctx = self._ctx({"realized_vol_5m_cc": 12.0, "realized_vol_60m_cc": 30.0})
+        assert per_bar_volatility_cc(ctx) == 12.0
+
+    def test_the_hour_window_is_used_when_the_short_one_is_absent(self):
+        from kat.strategies.common import per_bar_volatility_cc
+
+        assert per_bar_volatility_cc(self._ctx({"realized_vol_60m_cc": 30.0})) == 30.0
+
+    def test_a_zero_short_window_falls_through_rather_than_dividing_by_it(self):
+        """Zero is a missing estimate, not a calm market."""
+        from kat.strategies.common import per_bar_volatility_cc
+
+        ctx = self._ctx({"realized_vol_5m_cc": 0.0, "realized_vol_60m_cc": 30.0})
+        assert per_bar_volatility_cc(ctx) == 30.0
+
+    def test_neither_window_available_is_none_not_zero(self):
+        from kat.strategies.common import per_bar_volatility_cc
+
+        assert per_bar_volatility_cc(self._ctx({})) is None
+        assert per_bar_volatility_cc(self._ctx({"realized_vol_5m_cc": 0.0})) is None

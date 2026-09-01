@@ -58,6 +58,7 @@ __all__ = [
     "F_MID_CHANGE_15M_CC",
     "F_MODEL_CONFIDENCE",
     "F_REALIZED_VOL_5M_CC",
+    "F_REALIZED_VOL_60M_CC",
     "F_TIME_TO_EXPIRY_MS",
     "F_TRADE_IMBALANCE_5M",
     "F_VOLUME_5M_QC",
@@ -77,6 +78,7 @@ __all__ = [
     "event_execution_cost",
     "fee_schedule_for",
     "funding_benefit_micros",
+    "per_bar_volatility_cc",
     "perp_costing",
     "perp_execution_cost",
     "probability_to_cc",
@@ -97,6 +99,7 @@ F_MID_CHANGE_5M_CC = "mid_change_5m_cc"
 F_MID_CHANGE_15M_CC = "mid_change_15m_cc"
 #: Standard deviation of one-minute mid changes over the last 15 minutes, in cc.
 F_REALIZED_VOL_5M_CC = "realized_vol_5m_cc"
+F_REALIZED_VOL_60M_CC = "realized_vol_60m_cc"
 F_VOLUME_5M_QC = "volume_5m_qc"
 #: Standardised five-minute volume against the market's own trailing baseline.
 F_VOLUME_ZSCORE_5M = "volume_zscore_5m"
@@ -149,6 +152,33 @@ def conservative_fair_value_cc(raw_cc: float, market_cc: int) -> int:
     if raw_cc >= market_cc:
         return clamp_price_cc(math.floor(raw_cc))
     return clamp_price_cc(math.ceil(raw_cc))
+
+
+def per_bar_volatility_cc(ctx: StrategyContext) -> float | None:
+    """Per-bar volatility in centicents, from the shortest window that has one.
+
+    Both estimates are the standard deviation of change between consecutive
+    one-minute bars; they differ only in how far back the sample reaches. The
+    shorter is preferred because it responds faster, and the longer is a valid
+    substitute rather than a fudge -- the same quantity, measured over more data.
+
+    The fallback exists because the short window is not attainable on this venue.
+    ``realized_vol_5m_cc`` needs four bar-to-bar changes inside fifteen minutes,
+    which assumes a market that reprices continuously. Kalshi event contracts
+    reprice a few times an hour: of sixty watched markets, eight cleared that bar
+    and ``realized_vol_unavailable`` was the single largest reason the platform
+    declined to trade, at 76,644 refusals across a thousand cycles.
+
+    Returns ``None`` when neither window has enough movement to estimate. A zero
+    is not a calm market, it is a missing estimate, and dividing by it would make
+    every move infinitely significant -- so zero is refused here rather than
+    passed on as a number.
+    """
+    for name in (F_REALIZED_VOL_5M_CC, F_REALIZED_VOL_60M_CC):
+        value = ctx.feature(name)
+        if value is not None and math.isfinite(value) and value > 0.0:
+            return float(value)
+    return None
 
 
 def fee_schedule_for(ctx: StrategyContext) -> FeeSchedule:

@@ -39,11 +39,13 @@ from kat.strategies.common import (
     F_MID_CHANGE_1M_CC,
     F_MID_CHANGE_5M_CC,
     F_REALIZED_VOL_5M_CC,
+    F_REALIZED_VOL_60M_CC,
     F_TRADE_IMBALANCE_5M,
     F_VOLUME_ZSCORE_5M,
     TradingStrategy,
     clamp_price_cc,
     conservative_fair_value_cc,
+    per_bar_volatility_cc,
 )
 from kat.strategies.proposal import (
     EV_PARAM_SPACE,
@@ -120,6 +122,7 @@ class MomentumStrategy(TradingStrategy):
         F_MID_CHANGE_1M_CC,
         F_MID_CHANGE_5M_CC,
         F_REALIZED_VOL_5M_CC,
+        F_REALIZED_VOL_60M_CC,
         F_VOLUME_ZSCORE_5M,
         F_TRADE_IMBALANCE_5M,
     )
@@ -136,8 +139,8 @@ class MomentumStrategy(TradingStrategy):
         if stale is not None:
             return self.skip(stale)
 
-        vol_cc = ctx.feature(F_REALIZED_VOL_5M_CC)
-        if not vol_cc > 0.0:
+        vol_cc = per_bar_volatility_cc(ctx)
+        if vol_cc is None:
             return self.skip(_SKIP_NO_VOL)
 
         move_5m_cc = ctx.feature(F_MID_CHANGE_5M_CC)
