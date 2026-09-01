@@ -384,3 +384,81 @@ class TestValidationProtocol:
         assert result.leakage["clean"] is True
         assert result.leakage["violations"] == 0
         assert result.leakage["checks"] > 0
+
+
+class TestMonteCarloActuallyResamples:
+    """The path above the minimum-trade guard, which nothing exercised.
+
+    ``monte_carlo_sharpe`` read ``t.return_on_cost()`` where ``return_on_cost``
+    is a property, so the expression called the float it returned and raised
+    ``TypeError: 'float' object is not callable``. Every backtest with at least
+    five trades -- which is to say every backtest worth gating on -- failed
+    there. The one existing test used four trades and returned at the guard one
+    line above, so the suite was green and the function had never run.
+    """
+
+    @staticmethod
+    def _result(count: int, *, duration_days: float = 30.0):
+        from dataclasses import dataclass
+
+        @dataclass
+        class _Trade:
+            net_pnl_micros: int
+            cost_micros: int = 10_000
+
+            @property
+            def return_on_cost(self) -> float:
+                if self.cost_micros <= 0:
+                    return 0.0
+                return self.net_pnl_micros / self.cost_micros
+
+        class _Metrics:
+            pass
+
+        class _Result:
+            pass
+
+        metrics = _Metrics()
+        metrics.duration_days = duration_days  # type: ignore[attr-defined]
+        result = _Result()
+        # Alternating winners and losers, so the bootstrap has something to vary.
+        result.trades = [  # type: ignore[attr-defined]
+            _Trade(net_pnl_micros=(500 if i % 2 == 0 else -300)) for i in range(count)
+        ]
+        result.metrics = metrics  # type: ignore[attr-defined]
+        return result
+
+    def test_five_trades_is_resampled_rather_than_crashing(self):
+        block = monte_carlo_sharpe(self._result(5), runs=50)
+
+        assert block["runs"] == 50
+        assert block["trades_resampled"] == 5
+        assert block["monte_carlo_p5_sharpe"] is not None
+        assert isinstance(block["monte_carlo_p5_sharpe"], float)
+
+    def test_the_percentiles_are_ordered(self):
+        block = monte_carlo_sharpe(self._result(40), runs=200)
+
+        assert (
+            block["monte_carlo_p5_sharpe"]
+            <= block["monte_carlo_median_sharpe"]
+            <= block["monte_carlo_p95_sharpe"]
+        )
+        assert 0.0 <= block["monte_carlo_loss_probability"] <= 1.0
+
+    def test_a_strategy_that_only_loses_reports_a_negative_fifth_percentile(self):
+        """The gate reads p5 and requires it above zero; it has to be able to fail."""
+        result = self._result(20)
+        for trade in result.trades:
+            trade.net_pnl_micros = -400
+
+        block = monte_carlo_sharpe(result, runs=200)
+
+        assert block["monte_carlo_p5_sharpe"] < 0
+        assert block["monte_carlo_loss_probability"] == 1.0
+
+    def test_resampling_is_reproducible_for_a_given_seed(self):
+        a = monte_carlo_sharpe(self._result(20), runs=100, seed=7)
+        b = monte_carlo_sharpe(self._result(20), runs=100, seed=7)
+
+        assert a["monte_carlo_p5_sharpe"] == b["monte_carlo_p5_sharpe"]

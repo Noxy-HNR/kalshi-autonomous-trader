@@ -168,7 +168,7 @@ class ImpactEstimator:
             return None, "no event with both a polarity and a subject"
 
         best = max(signed, key=lambda e: e.confidence)
-        subject_surface = best.subject.replace("_", " ")
+        subject_surface = (best.subject or "").replace("_", " ")
 
         if subject_surface not in market_text:
             # The event has a subject, but the market does not name it, so we

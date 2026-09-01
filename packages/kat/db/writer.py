@@ -157,10 +157,11 @@ class AsyncWriter:
                 await asyncio.sleep(min(5.0, self._flush_interval * 4))
 
     async def _take_batch(self) -> list[_Item]:
+        batch: list[_Item]
         if self._retry_batch:
             batch, self._retry_batch = self._retry_batch, []
             return batch
-        batch: list[_Item] = []
+        batch = []
         while self._queue and len(batch) < self._batch_size:
             batch.append(self._queue.popleft())
         return batch
@@ -333,7 +334,7 @@ def _has_primary_key(obj: Base) -> bool:
     """
     return all(
         getattr(obj, column.name, None) is not None
-        for column in obj.__table__.primary_key.columns
+        for column in obj.__table__.primary_key
     )
 
 

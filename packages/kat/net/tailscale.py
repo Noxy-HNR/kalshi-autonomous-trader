@@ -149,7 +149,7 @@ def _address_from_interfaces() -> str | None:
     except OSError:
         return None
     for info in infos:
-        candidate = info[4][0]
+        candidate = str(info[4][0])
         if is_tailscale_address(candidate):
             return candidate
     return None

@@ -1498,6 +1498,9 @@ class BacktestEngine:
     ) -> None:
         """Strategy -> risk engine -> execution. There is no other path."""
         fees = self._entry_fee_micros(intent)
+        # Deliberately separate domains: the two ledgers return unrelated account
+        # types and each is handed only to its own risk engine.
+        state: Any
         if intent.market_type is MarketType.EVENT:
             state = self.event_ledger.account_state(
                 market=self.market, fills=self.fills, now_ms=now_ms,
@@ -1659,7 +1662,7 @@ class BacktestEngine:
             self._apply_fill(fill)
 
     def _build_result(self, start_ms: int, end_ms: int) -> BacktestResult:
-        ledger_trades = (
+        ledger_trades: Sequence[Any] = (
             self.event_ledger.trades
             if self.config.market_type is MarketType.EVENT
             else self.perp_ledger.trades

@@ -40,6 +40,7 @@ point here takes a *factory* and builds fresh instances for every single run.
 
 from __future__ import annotations
 
+import functools
 import math
 import statistics
 from collections.abc import Callable, Sequence
@@ -409,7 +410,7 @@ def monte_carlo_sharpe(
 
     import numpy as np
 
-    returns = np.array([t.return_on_cost() for t in trades], dtype=float)
+    returns = np.array([t.return_on_cost for t in trades], dtype=np.float64)
     rng = np.random.default_rng(seed)
     n = len(returns)
 
@@ -478,7 +479,7 @@ def perturbation_ratio(
     observed: dict[str, float] = {}
     for name, multiplier in (("down", 1.0 - shift), ("up", 1.0 + shift)):
         result = run_once(
-            events, lambda m=multiplier: perturbed_factory(m), config,
+            events, functools.partial(perturbed_factory, multiplier), config,
             label=f"perturb_{name}", **engine_kwargs,
         )
         observed[name] = 0.0 if result is None else result.metrics.sharpe

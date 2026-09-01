@@ -16,6 +16,7 @@ knows about a strategy, not that it trusts it.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from kat.common.enums import MarketType, StrategyState
@@ -211,7 +212,7 @@ def build_default_strategies(
     from kat.strategies.perp.funding_carry import FundingCarryStrategy
     from kat.strategies.perp.trend import PerpTrendStrategy
 
-    classes = [
+    classes: list[Callable[[], Strategy]] = [
         MispricingStrategy,
         MeanReversionStrategy,
         MomentumStrategy,

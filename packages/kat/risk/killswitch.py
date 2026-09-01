@@ -132,7 +132,8 @@ class KillSwitchManager:
         """Raise :class:`KillSwitchEngaged` when any relevant switch is on."""
         scope = self.blocking_switch(market_type, strategy_id=strategy_id)
         if scope is not None:
-            status = self._state.get((scope, strategy_id if scope == KillSwitchScope.STRATEGY else ""))
+            keyed_to = strategy_id or "" if scope is KillSwitchScope.STRATEGY else ""
+            status = self._state.get((scope, keyed_to))
             reason = (status.reason if status else None) or "no reason recorded"
             raise KillSwitchEngaged(scope, f"{scope} kill switch is engaged: {reason}")
 

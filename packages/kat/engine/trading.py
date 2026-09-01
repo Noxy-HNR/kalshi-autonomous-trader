@@ -313,7 +313,9 @@ class TradingLoop:
             result.duration_ms = (time.monotonic() - started) * 1000
             return result
 
-        intents: list[tuple[Strategy, OrderIntent]] = []
+        # ``None`` where the intent came from a cross-market source rather than
+        # from a per-ticker strategy; see :meth:`_process`.
+        intents: list[tuple[Strategy | None, OrderIntent]] = []
         for ticker in self.market_state.tickers():
             snapshot = self.market_state.get(ticker)
             if snapshot is None:
@@ -367,8 +369,10 @@ class TradingLoop:
         # competing for the same capital.
         intents.sort(key=lambda pair: (not pair[1].reduce_only, -(pair[1].expected_value_micros or 0)))
 
-        for strategy, intent in intents[: self.max_intents_per_cycle]:
-            await self._process(strategy, intent, now_ms, result)
+        # ``owner`` rather than ``strategy``: this one can be None, and reusing
+        # the sweep's name above would hide that from the reader and the checker.
+        for owner, intent in intents[: self.max_intents_per_cycle]:
+            await self._process(owner, intent, now_ms, result)
 
         result.duration_ms = (time.monotonic() - started) * 1000
         metrics.observe(M_DECISION_LATENCY, result.duration_ms, domain=self.market_type.value)
@@ -386,15 +390,25 @@ class TradingLoop:
         its own identity -- everything downstream, including the audit record,
         is keyed on it.
         """
-        if strategy is None and not intent.strategy_id:
-            result.errors += 1
-            log.error(
-                "trading.unattributed_intent",
-                domain=self.market_type.value, ticker=intent.ticker,
-            )
-            return
-        intent.strategy_id = intent.strategy_id or strategy.strategy_id
-        intent.strategy_version = intent.strategy_version or strategy.version
+        if strategy is None:
+            # Both halves of the identity, not just the id. The version is what
+            # ties a decision to the code that made it, and the old guard
+            # checked only the id before reading ``strategy.version`` off the
+            # None it had just proved was there -- so a source that supplied an
+            # id and no version raised AttributeError out of the cycle, taking
+            # every intent behind it in the batch with it.
+            if not intent.strategy_id or not intent.strategy_version:
+                result.errors += 1
+                log.error(
+                    "trading.unattributed_intent",
+                    domain=self.market_type.value, ticker=intent.ticker,
+                    strategy_id=intent.strategy_id or None,
+                    strategy_version=intent.strategy_version or None,
+                )
+                return
+        else:
+            intent.strategy_id = intent.strategy_id or strategy.strategy_id
+            intent.strategy_version = intent.strategy_version or strategy.version
         intent.decision_id = intent.decision_id or new_decision_id()
 
         with use_correlation_id(intent.correlation_id) as correlation_id:

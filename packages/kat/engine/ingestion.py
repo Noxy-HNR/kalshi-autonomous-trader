@@ -257,11 +257,11 @@ class MarketDataIngestor:
             return
         try:
             price_cc = parse_price_cc(
-                payload.get("price_dollars") or payload.get("price"),
+                _first(payload, "price_dollars", "price"),
                 rounding=Rounding.HALF_EVEN,
             )
             delta_qc = parse_count_qc(
-                payload.get("delta_fp") or payload.get("delta"), rounding=Rounding.HALF_EVEN
+                _first(payload, "delta_fp", "delta"), rounding=Rounding.HALF_EVEN
             )
         except (ValueError, TypeError):
             return
@@ -300,11 +300,11 @@ class MarketDataIngestor:
             return
         try:
             price_cc = parse_price_cc(
-                payload.get("yes_price_dollars") or payload.get("price"),
+                _first(payload, "yes_price_dollars", "price"),
                 rounding=Rounding.HALF_EVEN,
             )
             qty_qc = parse_count_qc(
-                payload.get("count_fp") or payload.get("count"), rounding=Rounding.HALF_EVEN
+                _first(payload, "count_fp", "count"), rounding=Rounding.HALF_EVEN
             )
         except (ValueError, TypeError):
             return
@@ -567,8 +567,8 @@ async def select_event_watchlist(
     quotable = [
         m
         for m in tradeable
-        if _spread_cc(m) is not None
-        and _spread_cc(m) <= _WATCH_MAX_SPREAD_CC
+        if (spread := _spread_cc(m)) is not None
+        and spread <= _WATCH_MAX_SPREAD_CC
         and _closes_within(m, _WATCH_MAX_DAYS_TO_CLOSE)
     ]
     if not quotable:

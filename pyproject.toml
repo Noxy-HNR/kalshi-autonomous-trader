@@ -108,3 +108,13 @@ warn_redundant_casts = true
 warn_unused_ignores = false
 no_implicit_optional = true
 strict_equality = true
+
+# numpy ships stubs written in 3.12+ syntax (`type X = ...`). Parsed under the
+# 3.11 target above they are a syntax error, and mypy stops at the first one --
+# so the whole gate silently checked *zero* project files while still exiting
+# non-zero for a reason that looked like somebody else's problem. Skipping into
+# numpy's stubs keeps the 3.11 compatibility check meaningful and restores it.
+[[tool.mypy.overrides]]
+module = ["numpy", "numpy.*"]
+follow_imports = "skip"
+follow_imports_for_stubs = true

@@ -42,6 +42,7 @@ from kat.common.timeutil import Clock
 from kat.db.models import ArbitrageOpportunity as ArbRow
 from kat.db.writer import AsyncWriter
 from kat.kalshi.fees import FeeSchedule
+from kat.marketdata.book import OrderBook
 from kat.marketdata.state import MarketState
 from kat.observability.logging import get_logger
 from kat.risk.types import OrderIntent
@@ -131,7 +132,7 @@ class ArbitrageScanner:
             exclusive, exhaustive = self.event_flags.get(event_ticker, (False, False))
             if not (exclusive and exhaustive):
                 continue
-            books = {}
+            books: dict[str, OrderBook] = {}
             for ticker in members:
                 if not self.market_state.is_fresh(ticker, now_ms=now_ms):
                     books = {}

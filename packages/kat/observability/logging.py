@@ -25,6 +25,7 @@ import logging.handlers
 import queue
 import re
 import sys
+from collections.abc import MutableMapping
 from pathlib import Path
 from typing import Any
 
@@ -106,7 +107,9 @@ def _add_correlation(_logger: Any, _name: str, event_dict: dict[str, Any]) -> di
     return event_dict
 
 
-def _rename_event(_logger: Any, _name: str, event_dict: dict[str, Any]) -> dict[str, Any]:
+def _rename_event(
+    _logger: Any, _name: str, event_dict: MutableMapping[str, Any]
+) -> MutableMapping[str, Any]:
     """Use ``message`` rather than structlog's ``event`` key.
 
     ``event`` collides with the domain meaning of "event contract" everywhere

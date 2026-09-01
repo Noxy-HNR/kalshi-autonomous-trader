@@ -25,6 +25,7 @@ ends up watching markets in paper mode, which is the correct place to end up.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import sys
 from typing import Any
 
@@ -285,7 +286,7 @@ class Platform:
             live_armed=settings.live_trading_armed,
         )
 
-        recorder_kwargs = {"environment": environment, "app_version": "0.1.0"}
+        recorder_kwargs: dict[str, Any] = {"environment": environment, "app_version": "0.1.0"}
         event_loop = TradingLoop(
             market_type=MarketType.EVENT,
             market_state=event_state,
@@ -596,16 +597,17 @@ class Platform:
                 )
             )
 
-        if settings.research.enabled:
+        research = self.research
+        if settings.research.enabled and research is not None:
             self.app.register(
                 ServiceComponent(
                     "research-regimes",
-                    run=_bind(self.research.run_regimes),
+                    run=_bind(research.run_regimes),
                     critical=False,
                 )
             )
             self.app.register(
-                ServiceComponent("research", run=self.research.run, critical=False)
+                ServiceComponent("research", run=research.run, critical=False)
             )
 
         if settings.news.enabled:
@@ -647,8 +649,14 @@ class Platform:
         stop the trading cycle: the strategies still have opinions worth acting
         on, and an arbitrage that was not found is not an emergency.
         """
+        scanner = self.arbitrage
+        if scanner is None:
+            # Reached before build_trading(); a broad except below would have
+            # logged this as a scan failure once per cycle, which reads as the
+            # scanner being broken rather than absent.
+            return []
         try:
-            opportunities = self.arbitrage.scan()
+            opportunities = scanner.scan()
         except Exception as exc:
             log.error("arbitrage.scan_failed", error=str(exc), exc_info=True)
             return []
@@ -840,9 +848,29 @@ class Platform:
             access_log=False,
         )
         self._api_server = uvicorn.Server(config)
-        # Uvicorn installs its own signal handlers by default, which would
-        # compete with the application's own shutdown path.
-        self._api_server.install_signal_handlers = False
+        # Keep uvicorn's hands off SIGINT/SIGTERM: the platform's own handler
+        # flushes the writer and records a clean shutdown, and uvicorn's merely
+        # stops uvicorn.
+        #
+        # This used to set ``install_signal_handlers = False``, which uvicorn
+        # removed in 0.30. Assigning it stopped meaning anything and simply
+        # created an unused attribute -- the check passed, the comment claimed
+        # the problem was handled, and ``serve()`` went on wrapping itself in
+        # ``capture_signals()`` and replacing both handlers anyway. The platform
+        # still shut down cleanly only because it installs its handlers after
+        # this point and therefore happens to win, which is not a property worth
+        # resting a clean shutdown on.
+        #
+        # Checked rather than assumed, so the next time uvicorn renames this the
+        # failure is a warning in the log instead of another silent no-op.
+        if hasattr(self._api_server, "capture_signals"):
+            self._api_server.capture_signals = contextlib.nullcontext  # type: ignore[assignment]
+        else:
+            log.warning(
+                "api.signal_capture_not_neutralised",
+                uvicorn_version=getattr(uvicorn, "__version__", "unknown"),
+                note="uvicorn may override the platform's shutdown handlers",
+            )
         self._api_task = asyncio.create_task(self._api_server.serve(), name="dashboard-api")
         log.info(
             "api.started",
