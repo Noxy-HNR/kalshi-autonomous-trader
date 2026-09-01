@@ -166,9 +166,14 @@ class EventContractsREST:
         )
         markets: list[EventMarket] = []
         for event in events:
+            # Fee terms hang off the series, and this is the only response that
+            # names it: the nested market payload does not carry series_ticker.
+            series_ticker = str(event.get("series_ticker") or "")
             for payload in event.get("markets") or ():
                 try:
-                    markets.append(EventMarket.parse(payload))
+                    markets.append(
+                        EventMarket.parse(payload, series_ticker=series_ticker)
+                    )
                 except Exception:
                     # One malformed market must not cost us the other 14,432.
                     continue
@@ -176,7 +181,8 @@ class EventContractsREST:
 
     async def get_series(self, series_ticker: str) -> dict[str, Any]:
         payload = await self.http.get(f"/series/{series_ticker}")
-        return payload.get("series") or payload
+        series = payload.get("series")
+        return series if isinstance(series, dict) else payload
 
     # -- portfolio -----------------------------------------------------------
 

@@ -41,6 +41,7 @@ from kat.engine.features import FeatureWorker
 from kat.engine.ingestion import (
     MarketDataIngestor,
     last_event_definitions,
+    load_fee_schedules,
     select_event_watchlist,
     select_perp_watchlist,
 )
@@ -452,9 +453,9 @@ class Platform:
                 # set_definitions ensures a snapshot for each one it is given --
                 # so handing it the unfiltered set creates state entries for
                 # markets nothing will ever send an update about.
-                event_ingestor.set_definitions(
-                    _subscribed_definitions(event_ingestor.watchlist)
-                )
+                definitions = _subscribed_definitions(event_ingestor.watchlist)
+                event_ingestor.set_definitions(definitions)
+                await self._load_event_fee_schedules(definitions)
 
         async def refresh_event_watchlist() -> None:
             """Re-choose what to watch, dropping the markets that never move.
@@ -490,9 +491,9 @@ class Platform:
                     watchlist = (keep + incoming)[: len(current) or None]
 
                     await event_ingestor.set_watchlist(watchlist)
-                    event_ingestor.set_definitions(
-                        _subscribed_definitions(event_ingestor.watchlist)
-                    )
+                    definitions = _subscribed_definitions(event_ingestor.watchlist)
+                    event_ingestor.set_definitions(definitions)
+                    await self._load_event_fee_schedules(definitions)
                     log.info(
                         "ingestion.watchlist_refreshed",
                         domain="event",
@@ -641,6 +642,37 @@ class Platform:
                 count=applied,
                 note="risk limits differ from the shipped defaults",
             )
+
+    async def _load_event_fee_schedules(
+        self, definitions: dict[str, dict[str, Any]]
+    ) -> None:
+        """Fetch the fee terms for the markets currently watched.
+
+        Failures are swallowed on purpose. Fee terms are an improvement on the
+        fallback, not a precondition for trading: without them every estimate
+        keeps the inexact 50% margin, which is the behaviour the platform had
+        before this was wired at all. Refusing to start over a series lookup
+        would trade a conservative estimate for no trading whatsoever.
+
+        The mapping is shared by reference with the execution engine and the
+        arbitrage scanner, so filling it here fills it everywhere it is read.
+        """
+        loop = self.context.loops.get(MarketType.EVENT)
+        if self.event_rest is None or loop is None or not definitions:
+            return
+        try:
+            await load_fee_schedules(
+                self.event_rest, definitions, into=loop.fee_schedules
+            )
+        except Exception as exc:
+            log.warning(
+                "ingestion.fee_schedules_failed",
+                error=str(exc),
+                note="estimates keep the inexact fallback margin",
+            )
+        else:
+            if self.arbitrage is not None:
+                self.arbitrage.fee_schedules = loop.fee_schedules
 
     def _scan_arbitrage(self, now_ms: int) -> list[Any]:
         """One arbitrage pass, converted to intents.

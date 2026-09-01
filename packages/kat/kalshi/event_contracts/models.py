@@ -89,6 +89,10 @@ class EventMarket:
     ticker: str
     event_ticker: str
     status: str
+    #: The series this market belongs to, which is what carries the fee terms.
+    #: Only the *event* payload names it -- a nested market does not -- so it is
+    #: supplied by the caller that unwrapped the event rather than parsed here.
+    series_ticker: str = ""
     title: str | None = None
     yes_sub_title: str | None = None
     no_sub_title: str | None = None
@@ -118,11 +122,14 @@ class EventMarket:
     raw: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def parse(cls, payload: dict[str, Any]) -> EventMarket:
+    def parse(cls, payload: dict[str, Any], *, series_ticker: str = "") -> EventMarket:
         return cls(
             ticker=payload["ticker"],
             event_ticker=payload.get("event_ticker", ""),
             status=payload.get("status", "unknown"),
+            # Falls back to the payload in case a future response starts carrying
+            # it, but today only the enclosing event knows.
+            series_ticker=series_ticker or str(payload.get("series_ticker") or ""),
             title=payload.get("title") or payload.get("yes_sub_title"),
             yes_sub_title=payload.get("yes_sub_title"),
             no_sub_title=payload.get("no_sub_title"),

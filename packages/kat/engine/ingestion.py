@@ -39,6 +39,7 @@ from kat.common.timeutil import Clock
 from kat.db.models import Quote, TradePrint
 from kat.db.writer import AsyncWriter
 from kat.kalshi.event_contracts.rest import EventContractsREST
+from kat.kalshi.fees import FeeSchedule
 from kat.kalshi.perps.rest import PerpsREST
 from kat.kalshi.ws import KalshiWebSocket
 from kat.marketdata.state import MarketState
@@ -47,7 +48,7 @@ from kat.observability.metrics import M_WS_MESSAGES, metrics
 
 log = get_logger(__name__)
 
-__all__ = ["MarketDataIngestor", "select_event_watchlist"]
+__all__ = ["MarketDataIngestor", "load_fee_schedules", "select_event_watchlist"]
 
 #: How many markets to track per domain. Bounded because every subscription
 #: costs bandwidth, memory and message-processing time, and a strategy cannot
@@ -600,6 +601,10 @@ async def select_event_watchlist(
             "no_sub_title": m.no_sub_title or "",
             "rules_primary": m.rules_primary or "",
             "event_ticker": m.event_ticker or "",
+            # Carried so the fee terms can be fetched for these markets and only
+            # these: the series endpoint is per-series, and the watchlist is a
+            # few dozen markets drawn from a handful of them.
+            "series_ticker": m.series_ticker or "",
             "close_ts_ms": int(m.close_time.timestamp() * 1000) if m.close_time else None,
             "status": m.status or "",
         }
@@ -639,3 +644,85 @@ async def select_perp_watchlist(
         domain="perp", considered=len(markets), chosen=len(chosen),
     )
     return chosen
+
+
+#: Fee terms per series, keyed by series ticker. Fetched once and kept for the
+#: life of the process: a series' fee schedule is a property of the product, not
+#: of the market's state, and it does not change while the platform is running.
+_SERIES_SCHEDULES: dict[str, FeeSchedule] = {}
+
+
+async def load_fee_schedules(
+    rest: EventContractsREST,
+    definitions: dict[str, dict[str, Any]],
+    *,
+    into: dict[str, FeeSchedule],
+) -> int:
+    """Fill ``into`` with the fee terms for each market in ``definitions``.
+
+    Nothing was calling this. ``FeeSchedule.from_series`` existed, ``get_series``
+    existed, and the ``fee_schedules`` dicts on the trading loop and the
+    arbitrage scanner existed -- but no code ever connected them, so the mapping
+    stayed empty for the life of every run and every fee estimate in the platform
+    fell back to an unknown schedule.
+
+    That is not a neutral default. An unknown schedule is marked inexact, which
+    inflates the estimate by 50% so an unguessable fee cannot make a marginal
+    trade look profitable. Correct when the terms really are unknown; permanently
+    wrong when they are one request away. Every strategy costed its round trip
+    half again over the odds and declined trades on an edge it did have.
+
+    Fetched per *series*, not per market: sixty watched markets come from a
+    handful of series, and the terms are a property of the series. Failures are
+    logged and skipped rather than raised -- a schedule we could not fetch leaves
+    the market on the inexact fallback, which is exactly the conservative
+    behaviour that was already in place.
+    """
+    wanted: dict[str, list[str]] = {}
+    for ticker, definition in definitions.items():
+        series = str(definition.get("series_ticker") or "").strip()
+        if series:
+            wanted.setdefault(series, []).append(ticker)
+
+    fetched = 0
+    for series in wanted:
+        if series in _SERIES_SCHEDULES:
+            continue
+        try:
+            payload = await rest.get_series(series)
+        except Exception as exc:
+            log.warning(
+                "ingestion.fee_schedule_unavailable",
+                series=series,
+                error=str(exc),
+                note="markets in this series keep the inexact fallback",
+            )
+            continue
+        _SERIES_SCHEDULES[series] = FeeSchedule.from_exchange_series(payload)
+        fetched += 1
+
+    applied = 0
+    for series, tickers in wanted.items():
+        schedule = _SERIES_SCHEDULES.get(series)
+        if schedule is None:
+            continue
+        for ticker in tickers:
+            into[ticker] = schedule
+            applied += 1
+
+    # Markets that have left the watchlist keep no slot here: the mapping is read
+    # by ticker on the trading path and an entry for a market nobody watches is a
+    # slow leak across a long-running process.
+    for ticker in list(into):
+        if ticker not in definitions:
+            del into[ticker]
+
+    if wanted:
+        log.info(
+            "ingestion.fee_schedules_loaded",
+            series_known=len(_SERIES_SCHEDULES),
+            series_fetched=fetched,
+            markets_priced=applied,
+            markets_without=len(definitions) - applied,
+        )
+    return applied
