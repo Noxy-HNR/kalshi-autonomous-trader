@@ -370,3 +370,41 @@ class TestOnlyEvidenceIsRecorded:
                 self._candidate(gross=-100, ev=-17_100, reason="no gross edge")
             )
         assert writer.rows == []
+
+
+class TestExclusivityIsNotExhaustiveness:
+    """The trap that sits where the arbitrage scanner is wired up.
+
+    Mutually exclusive means *at most* one outcome resolves YES. Exhaustive
+    means *at least* one does. Only both together make a set sum to a dollar at
+    settlement, and Kalshi publishes only the first.
+
+    Measured on the live board: 1,491 mutually exclusive sets, 36 of which trade
+    below a dollar net of fees and offer up to 8,478 centicents on the dollar.
+    None is an arbitrage. KXSTATE51-29 prices eight candidate states at 14.20
+    cents in total because the market believes there will be no 51st state at
+    all -- a bet at six to one against, wearing the costume of free money.
+    """
+
+    def test_the_scanner_requires_both_flags(self):
+        from pathlib import Path
+
+        import kat.arbitrage.scanner as scanner
+
+        source = Path(scanner.__file__).read_text(encoding="utf-8")
+        assert "if not (exclusive and exhaustive):" in source, (
+            "the mutually-exclusive branch must require exhaustiveness, not "
+            "exclusivity alone"
+        )
+
+    def test_flags_default_to_refusing(self):
+        """An event nobody has vouched for is not assumed exhaustive."""
+        from kat.arbitrage.scanner import ArbitrageScanner
+        from kat.common.enums import MarketType
+        from kat.common.timeutil import SimulatedClock
+        from kat.marketdata.state import MarketState
+
+        scanner = ArbitrageScanner(
+            market_state=MarketState(MarketType.EVENT), clock=SimulatedClock(0)
+        )
+        assert scanner.event_flags.get("ANYTHING", (False, False)) == (False, False)

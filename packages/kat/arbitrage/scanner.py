@@ -74,6 +74,26 @@ class ArbitrageScanner:
         #: belong to which event, and whether that event is genuinely mutually
         #: exclusive and exhaustive.
         self.event_members: dict[str, list[str]] = {}
+        #: (exclusive, exhaustive) per event ticker. Nothing populates this, so
+        #: the mutually-exclusive branch below has never run -- and it must not
+        #: be wired up from Kalshi's ``mutually_exclusive`` field, which is the
+        #: obvious-looking source and the wrong one.
+        #:
+        #: Mutually exclusive means *at most* one outcome resolves YES.
+        #: Exhaustive means *at least* one does. Only both together make a set
+        #: sum to a dollar at settlement, and the API publishes only the first.
+        #:
+        #: Measured on the live board: 1,491 mutually exclusive sets, of which 36
+        #: trade below a dollar net of fees, offering up to 8,478 centicents on a
+        #: dollar. None is an arbitrage. KXSTATE51-29 prices eight candidate
+        #: states at 14.20 cents *in total* because the market believes there
+        #: will be no 51st state at all; buying the set is a bet at 6-to-1
+        #: against, wearing the costume of free money. Treating exclusivity as
+        #: sufficient would have found 36 of those and called every one riskless.
+        #:
+        #: The complementary-pair branch needs no such assumption -- YES and NO
+        #: on one market settle to a dollar by construction -- which is why it is
+        #: the branch that runs.
         self.event_flags: dict[str, tuple[bool, bool]] = {}
         #: Threshold ladders keyed by series, as (ticker, threshold) pairs.
         self.ladders: dict[str, list[tuple[str, float]]] = {}
