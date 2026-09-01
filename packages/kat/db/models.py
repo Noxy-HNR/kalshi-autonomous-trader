@@ -577,8 +577,16 @@ class ModelRegistry(Base, TimestampMixin):
 
     __tablename__ = "model_registry"
 
+    # Composite, because a registry that cannot hold two versions of a model is
+    # a registry that can never retrain. model_id is derived from the domain,
+    # the target and the family -- so every retrain of a family produces the
+    # same id, and with the id alone as the key the second one violates the
+    # primary key and the run dies. Every lookup in ModelRegistry already reads
+    # (model_id, version) together; only the schema disagreed, and it is the
+    # schema that was wrong. Archiving an old version and deploying a new one is
+    # the whole point of the deployment_state column below.
     model_id: Mapped[str] = mapped_column(String(96), primary_key=True)
-    version: Mapped[str] = mapped_column(String(32), nullable=False)
+    version: Mapped[str] = mapped_column(String(32), primary_key=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     model_type: Mapped[str] = mapped_column(String(48), nullable=False)  # xgboost, logistic, ...
     market_type: Mapped[str] = mapped_column(String(8), nullable=False, index=True)
