@@ -45,22 +45,31 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import ROUND_CEILING, Decimal
-from typing import Final
+from typing import Any, Final
 
 from kat.common.fixedpoint import CC_PER_DOLLAR, MICROS_PER_DOLLAR, QC_PER_CONTRACT
 
 __all__ = [
+    "BASE_COEFFICIENT",
     "FALLBACK_MULTIPLIER",
     "FeeEstimate",
     "FeeSchedule",
     "estimate_fee_micros",
     "prorate_fee_micros",
+    "realised_fee_micros",
     "round_trip_fee_micros",
 ]
 
-#: Kalshi's published general trading fee coefficient. Used only when the series
-#: multiplier is unavailable, and always flagged as an inexact estimate.
-FALLBACK_MULTIPLIER: Final[Decimal] = Decimal("0.07")
+#: Kalshi's published general trading fee coefficient -- the ``m`` in
+#: ``m * C * P * (1 - P)``. The API does not carry it; the exchange publishes
+#: only a per-series *scale* on it. So this constant is the only place the base
+#: rate exists, and :meth:`FeeSchedule.from_exchange_series` is the only thing
+#: that applies a scale to it.
+BASE_COEFFICIENT: Final[Decimal] = Decimal("0.07")
+
+#: The same number in its other job: what a schedule falls back to when the
+#: series terms are unknown, which is also when the estimate is marked inexact.
+FALLBACK_MULTIPLIER: Final[Decimal] = BASE_COEFFICIENT
 
 #: Extra margin applied to an inexact estimate, so an unknown fee schedule
 #: cannot make a marginal trade look profitable.
@@ -101,6 +110,16 @@ class FeeSchedule:
     ) -> FeeSchedule:
         """Build a schedule, preferring an event-level override over the series.
 
+        ``fee_multiplier`` here is the **coefficient** -- the whole ``m`` in
+        ``m * C * P * (1 - P)`` -- which is what every caller in this codebase
+        passes and what :func:`estimate_fee_micros` consumes.
+
+        It is *not* the ``fee_multiplier`` field the exchange returns. That one
+        is a scale on Kalshi's published base rate and reads ``1`` for a standard
+        series. Use :meth:`from_exchange_series` for a payload, which converts;
+        passing the exchange's value straight in here would price a $0.50
+        contract at 25 cents a side instead of 1.75.
+
         A null override means "cleared", not "zero", so a null falls back to the
         series value rather than to a free market.
         """
@@ -116,6 +135,50 @@ class FeeSchedule:
             multiplier=Decimal(str(raw_multiplier)),
             exact=True,
         )
+
+    @classmethod
+    def from_exchange_series(
+        cls,
+        payload: dict[str, Any] | None,
+        *,
+        fee_type_override: str | None = None,
+        fee_multiplier_override: float | None = None,
+    ) -> FeeSchedule:
+        """Build a schedule from Kalshi's own ``GET /series/{ticker}`` response.
+
+        The exchange's ``fee_multiplier`` is a scale on its published base rate,
+        not the rate itself. The base coefficient lives in the fee schedule PDF
+        and never in the API, which is why :data:`BASE_COEFFICIENT` has to be
+        supplied from this side. Every series sampled on production returns
+        exactly ``1``, meaning "charged at the standard rate".
+
+        Reading that ``1`` as the coefficient is the trap this method exists to
+        close, and it is a quiet one. The model would become
+        ``1.0 * C * P * (1 - P)``: 25 cents on a $0.50 contract rather than 1.75,
+        fourteen times the truth, on a schedule marked *exact* so nothing
+        downstream would pad it or doubt it. Every expected value in the platform
+        would go negative at once and the strategies would stop trading, for a
+        reason no log would name.
+        """
+        data = payload or {}
+        raw_type = fee_type_override or data.get("fee_type") or "quadratic"
+        raw_scale = (
+            fee_multiplier_override
+            if fee_multiplier_override is not None
+            else data.get("fee_multiplier")
+        )
+        if raw_scale is None:
+            return cls(fee_type=str(raw_type), multiplier=BASE_COEFFICIENT, exact=False)
+        try:
+            scale = Decimal(str(raw_scale))
+        except (ArithmeticError, ValueError):
+            return cls(fee_type=str(raw_type), multiplier=BASE_COEFFICIENT, exact=False)
+        if scale <= 0:
+            # A free market is not something the exchange offers, so a zero or
+            # negative scale is a payload we do not understand rather than a
+            # discount. Fall back, and stay inexact so the margin is applied.
+            return cls(fee_type=str(raw_type), multiplier=BASE_COEFFICIENT, exact=False)
+        return cls(fee_type=str(raw_type), multiplier=BASE_COEFFICIENT * scale, exact=True)
 
     @property
     def maker_multiplier(self) -> Decimal | None:
@@ -143,6 +206,7 @@ def estimate_fee_micros(
     qty_qc: int,
     schedule: FeeSchedule | None = None,
     is_taker: bool = True,
+    apply_safety_margin: bool = True,
 ) -> FeeEstimate:
     """Estimate the trading fee for ``qty_qc`` contracts at ``price_cc``.
 
@@ -174,7 +238,7 @@ def estimate_fee_micros(
                 multiplier = multiplier * maker
         raw = multiplier * contracts * price * (Decimal(1) - price)
 
-    if not schedule.exact:
+    if not schedule.exact and apply_safety_margin:
         # We are guessing at the coefficient; guess high.
         raw = raw * INEXACT_SAFETY_MARGIN
 
@@ -232,3 +296,37 @@ def prorate_fee_micros(fee_micros: int, *, from_qty_qc: int, to_qty_qc: int) -> 
     if from_qty_qc <= 0 or to_qty_qc >= from_qty_qc:
         return fee_micros
     return -(-fee_micros * to_qty_qc // from_qty_qc)
+
+
+def realised_fee_micros(
+    *,
+    price_cc: int,
+    qty_qc: int,
+    schedule: FeeSchedule | None = None,
+    is_taker: bool = True,
+) -> int:
+    """What the exchange would actually charge for a fill that happened.
+
+    Distinct from :func:`estimate_fee_micros` in exactly one way, and the
+    difference is the whole reason this exists. An estimate is used to decide
+    whether to trade, so when the coefficient is unknown it is padded by
+    :data:`INEXACT_SAFETY_MARGIN` -- deliberately too high, so an unknown fee
+    schedule cannot make a marginal trade look profitable. That padding is a
+    property of the decision, not of the market.
+
+    Charging it is a different claim: that the exchange took 50% more than the
+    published schedule says. It did not. Billing a padded estimate as a realised
+    cost makes simulated results worse than the reality they exist to predict,
+    which is the direction that quietly rejects strategies that would have
+    worked.
+
+    Only the simulated-fill path needs this. Live and demo take the fee from the
+    exchange's own fill payload and never model it at all.
+    """
+    return estimate_fee_micros(
+        price_cc=price_cc,
+        qty_qc=qty_qc,
+        schedule=schedule,
+        is_taker=is_taker,
+        apply_safety_margin=False,
+    ).fee_micros

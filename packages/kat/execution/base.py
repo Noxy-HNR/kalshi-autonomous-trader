@@ -34,7 +34,7 @@ from kat.db.models import Fill as FillRow
 from kat.db.models import Order as OrderRow
 from kat.db.writer import AsyncWriter
 from kat.execution.order import ManagedOrder
-from kat.kalshi.fees import FeeSchedule, estimate_fee_micros
+from kat.kalshi.fees import FeeSchedule, realised_fee_micros
 from kat.kalshi.http import AmbiguousSubmission
 from kat.marketdata.book import OrderBook
 from kat.observability.logging import get_logger
@@ -290,7 +290,12 @@ class ExecutionEngine(ABC):
         # silently swamps every edge the strategies were being judged on. A realised
         # fee is computed from the fill, which is also what the live path does: there
         # it comes from the exchange's fill payload, never from this model.
-        fee = estimate_fee_micros(
+        # realised_ rather than estimate_: an estimate for an unknown schedule is
+        # padded by 50% so that an unknown fee cannot make a marginal trade look
+        # profitable. That padding belongs to the decision. Charging it would
+        # claim the exchange took more than its published schedule says, and
+        # would make paper results worse than the reality they exist to predict.
+        fee_micros = realised_fee_micros(
             price_cc=avg_price,
             qty_qc=filled_qc,
             schedule=self.fee_schedules.get(order.ticker),
@@ -300,7 +305,7 @@ class ExecutionEngine(ABC):
             fill_id=f"paper-{order.order_id}",
             qty_qc=filled_qc,
             price_cc=avg_price,
-            fee_micros=fee.fee_micros,
+            fee_micros=fee_micros,
         )
         metrics.increment(M_ORDERS_FILLED, domain=self.market_type.value, mode="paper")
         self._persist_fill(
@@ -308,7 +313,7 @@ class ExecutionEngine(ABC):
             fill_id=f"paper-{order.order_id}",
             qty_qc=filled_qc,
             price_cc=avg_price,
-            fee_micros=fee.fee_micros,
+            fee_micros=fee_micros,
         )
 
     # -- persistence ---------------------------------------------------------

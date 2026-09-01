@@ -25,7 +25,12 @@ from kat.common.enums import (
 )
 from kat.common.timeutil import SimulatedClock
 from kat.execution.event_exec import EventExecutionEngine
-from kat.kalshi.fees import estimate_fee_micros, prorate_fee_micros
+from kat.kalshi.fees import (
+    INEXACT_SAFETY_MARGIN,
+    estimate_fee_micros,
+    prorate_fee_micros,
+    realised_fee_micros,
+)
 from kat.marketdata.book import OrderBook
 from kat.marketdata.state import MarketState
 from kat.risk.types import OrderIntent, RiskVerdict
@@ -89,9 +94,9 @@ class TestThePaperFillIsChargedForWhatFilled:
         )
 
         assert order.filled_qty_qc == APPROVED_QC
-        expected = estimate_fee_micros(
+        expected = realised_fee_micros(
             price_cc=order.avg_fill_price_cc, qty_qc=APPROVED_QC
-        ).fee_micros
+        )
         assert order.fees_micros == expected
         assert order.fees_micros < stale_estimate / 6
 
@@ -135,9 +140,9 @@ class TestThePaperFillIsChargedForWhatFilled:
         )
 
         assert 0 < order.filled_qty_qc < APPROVED_QC
-        expected = estimate_fee_micros(
+        expected = realised_fee_micros(
             price_cc=order.avg_fill_price_cc, qty_qc=order.filled_qty_qc
-        ).fee_micros
+        )
         assert order.fees_micros == expected
 
     async def test_an_unmarketable_order_rests_and_is_charged_nothing(self):
@@ -202,3 +207,47 @@ class TestTheRiskVerdictReportsTheFeeForTheSizeItApproved:
         if verdict.approved_qty_qc < intent.qty_qc:
             assert verdict.estimated_fees_micros < full_fee
         assert verdict.estimated_fees_micros <= full_fee
+
+
+class TestAChargeIsNotAPaddedEstimate:
+    """The safety margin belongs to the decision, not to the bill.
+
+    When the series coefficient is unknown the estimate is inflated by 50%, so
+    an unknown fee cannot make a marginal trade look profitable. Charging that
+    padded number claims the exchange took more than its published schedule
+    says, and makes paper results worse than the reality they exist to predict
+    -- the direction that quietly rejects strategies that would have worked.
+    """
+
+    def test_the_realised_fee_drops_the_margin_an_estimate_adds(self):
+        estimated = estimate_fee_micros(price_cc=PRICE_CC, qty_qc=APPROVED_QC).fee_micros
+        charged = realised_fee_micros(price_cc=PRICE_CC, qty_qc=APPROVED_QC)
+
+        assert charged < estimated
+        assert charged == pytest.approx(estimated / float(INEXACT_SAFETY_MARGIN), rel=0.01)
+
+    def test_a_known_schedule_charges_exactly_what_it_estimates(self):
+        """With nothing guessed at there is nothing to pad, so the two agree."""
+        from kat.kalshi.fees import FeeSchedule
+
+        schedule = FeeSchedule.from_series("quadratic", 0.07)
+        assert schedule.exact
+
+        estimated = estimate_fee_micros(
+            price_cc=PRICE_CC, qty_qc=APPROVED_QC, schedule=schedule
+        ).fee_micros
+        charged = realised_fee_micros(
+            price_cc=PRICE_CC, qty_qc=APPROVED_QC, schedule=schedule
+        )
+        assert charged == estimated
+
+    async def test_the_paper_fill_charges_the_unpadded_fee(self):
+        engine = _engine()
+        order = await engine.submit(
+            _verdict(approved_qc=APPROVED_QC, estimated_fees_micros=366_700)
+        )
+        padded = estimate_fee_micros(
+            price_cc=order.avg_fill_price_cc, qty_qc=order.filled_qty_qc
+        ).fee_micros
+
+        assert order.fees_micros < padded
