@@ -50,7 +50,12 @@ from kat.common.fixedpoint import CC_PER_DOLLAR, QC_PER_CONTRACT
 from kat.kalshi.fees import realised_fee_micros
 from kat.risk.types import OrderIntent
 from kat.strategies.base import StrategyContext, StrategyParam
-from kat.strategies.common import TradingStrategy, clamp_price_cc
+from kat.strategies.common import (
+    TradingStrategy,
+    clamp_price_cc,
+    event_costing,
+    fee_schedule_for,
+)
 from kat.strategies.proposal import (
     EV_PARAM_SPACE,
     LIQUIDITY_PARAM_SPACE,
@@ -67,6 +72,7 @@ _SKIP_WRONG_TARGET = "model_answers_a_different_question"
 _SKIP_NO_VIEW = "model_has_no_directional_view"
 _SKIP_EDGE_TOO_SMALL = "drift_below_threshold"
 _SKIP_PRICE_BAND = "price_outside_band"
+_SKIP_HOLDING = "holding_while_the_view_stands"
 
 #: Targets this strategy can read: a forward move over a horizon, with the
 #: threshold that defines "a move" written into the name.
@@ -151,6 +157,22 @@ class ModelDriftStrategy(TradingStrategy):
         drift_cc = int(threshold_cc * (2.0 * probability - 1.0))
         fair_value_cc = clamp_price_cc(mid_cc + drift_cc)
 
+        # Exits come first, and they come before the cost test.
+        #
+        # A drift strategy with no exit is not a strategy, it is an accumulator.
+        # Replayed over a week it opened 36 positions, closed none of them, and
+        # finished down 0.59% -- of which $1.51 was fees on a $200 account. Every
+        # position was still open at the end, so nothing it predicted was ever
+        # realised; it paid to enter, held, and paid again in marks.
+        #
+        # The view that opened a position is the view that should close it. When
+        # the model's drift turns against what is held, the reason for holding is
+        # gone, and waiting for a fresh entry-quality edge in the other direction
+        # is waiting for a much rarer event than the one that already happened.
+        exit_intent = self._exit_if_reversed(ctx, drift_cc, quote)
+        if exit_intent is not None:
+            return self.emit([exit_intent])
+
         # Both sides against their own executable price, exactly as the
         # mispricing strategy does: the NO edge is (1 - fair) - no_ask.
         yes_edge_cc = fair_value_cc - quote.yes_ask_cc
@@ -221,6 +243,59 @@ class ModelDriftStrategy(TradingStrategy):
             },
         )
         return self.emit([intent])
+
+    def _exit_if_reversed(
+        self, ctx: StrategyContext, drift_cc: int, quote: object
+    ) -> OrderIntent | None:
+        """Flatten a position the model no longer supports.
+
+        Returns ``None`` when there is nothing held or the view still stands.
+
+        Not subject to the cost floor that governs entries. That floor asks
+        whether an edge is worth paying to capture; this is asking whether to
+        keep paying to hold a position whose reason has gone. Kalshi is exited by
+        buying the other outcome, so this is expressed as a reduce-only buy of
+        the opposite side and the risk engine verifies it genuinely reduces.
+        """
+        position_qc = ctx.position_qc
+        if position_qc == 0:
+            return None
+
+        holding_yes = position_qc > 0
+        drift_up = drift_cc > 0
+        if holding_yes == drift_up:
+            # The view that opened this still stands.
+            return None
+
+        side = OutcomeSide.NO if holding_yes else OutcomeSide.YES
+        price_cc = quote.no_ask_cc if holding_yes else quote.yes_ask_cc  # type: ignore[attr-defined]
+        if not price_cc:
+            return None
+
+        intent = self.event_intent(
+            ctx,
+            side=side,
+            qty_qc=abs(position_qc),
+            limit_price_cc=price_cc,
+            fair_value_cc=clamp_price_cc(quote.mid_cc + drift_cc),  # type: ignore[attr-defined]
+            confidence=min(0.99, abs(drift_cc) / max(1, abs(drift_cc))),
+            costing=event_costing(
+                side=side,
+                cost_cc=price_cc,
+                fair_value_cc=clamp_price_cc(quote.mid_cc + drift_cc),  # type: ignore[attr-defined]
+                qty_qc=abs(position_qc),
+                schedule=fee_schedule_for(ctx),
+            ),
+            reason="model_drift_reversed",
+            extra={
+                "model_probability": round(ctx.model_probability or 0.0, 6),
+                "model_target": ctx.model_target,
+                "held_qc": position_qc,
+                "drift_cc": drift_cc,
+            },
+        )
+        intent.reduce_only = True
+        return intent
 
     @staticmethod
     def _round_trip_cc(mid_cc: int, spread_cc: int) -> int:

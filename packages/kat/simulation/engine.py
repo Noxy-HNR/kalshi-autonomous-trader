@@ -538,6 +538,10 @@ class ModelPrediction:
     available_ms: int
     model_id: str | None = None
     model_version: str | None = None
+    #: What the probability is a probability of. A strategy that reads the
+    #: number without this is not reading a probability, it is reading a float --
+    #: and a backtest that omits it measures a strategy standing aside.
+    target: str | None = None
 
 
 FeatureProvider = Callable[[str, int], "Sequence[TimedFeature] | FeatureVector | None"]
@@ -1454,7 +1458,7 @@ class BacktestEngine:
                         return None
                     features[tf.name] = tf.value
 
-        probability = model_id = model_version = None
+        probability = model_id = model_version = model_target = None
         if self._model_provider is not None:
             prediction = self._model_provider(snap.ticker, now_ms)
             if prediction is not None:
@@ -1467,6 +1471,7 @@ class BacktestEngine:
                 probability = prediction.probability
                 model_id = prediction.model_id
                 model_version = prediction.model_version
+                model_target = prediction.target
                 self.predictions.append(
                     PredictionRecord(
                         ticker=snap.ticker, ts_ms=now_ms, probability=probability,
@@ -1487,6 +1492,7 @@ class BacktestEngine:
             market=snap,
             features=features,
             model_probability=probability,
+            model_target=model_target,
             model_id=model_id,
             model_version=model_version,
             position_qc=position_qc,

@@ -28,17 +28,84 @@ from typing import Any
 from kat.common.enums import MarketType
 from kat.config.settings import AppSettings, EventRiskSettings
 from kat.observability.logging import configure_logging
-from kat.simulation.engine import BacktestConfig, BacktestEngine, EventFeed, book_event
+from kat.simulation.engine import (
+    BacktestConfig,
+    BacktestEngine,
+    EventFeed,
+    ModelPrediction,
+    book_event,
+)
 from kat.simulation.features import SimFeatureProvider
 from kat.strategies.event.expiry_drift import ExpiryDriftStrategy
 from kat.strategies.event.mean_reversion import MeanReversionStrategy
+from kat.strategies.event.model_drift import ModelDriftStrategy
 from kat.strategies.event.momentum import MomentumStrategy
 
 STRATEGIES = {
     "mean_reversion": MeanReversionStrategy,
     "momentum": MomentumStrategy,
     "expiry_drift": ExpiryDriftStrategy,
+    "model_drift": ModelDriftStrategy,
 }
+
+
+class DeployedModelProvider:
+    """Scores the deployed model at each decision time, as the live path does.
+
+    The point of a backtest is to answer in minutes what live paper trading
+    answers in days, and a backtest that cannot serve the model can only measure
+    the strategies that ignore it. Features come from the same
+    :class:`SimFeatureProvider` the strategies read, so a probability here and a
+    probability in production are computed from the same numbers.
+
+    ``info_ts_ms`` is the feature vector's own timestamp rather than the decision
+    time, so the engine's leakage check is scoring the information the model
+    actually used.
+    """
+
+    def __init__(self, model: Any, features: Any) -> None:
+        self.model = model
+        self.features = features
+        self.scored = 0
+        self.no_features = 0
+
+    def __call__(self, ticker: str, now_ms: int) -> ModelPrediction | None:
+        import numpy as np
+
+        vector = self.features(ticker, now_ms)
+        if vector is None or not getattr(vector, "values", None):
+            self.no_features += 1
+            return None
+        row = np.asarray([vector.ordered(self.model.feature_names)], dtype=float)
+        if not np.isfinite(row).all():
+            self.no_features += 1
+            return None
+        raw = self.model.estimator.predict_proba(row)[:, 1]
+        if self.model.calibrator is not None:
+            raw = np.clip(self.model.calibrator.transform(raw), 0.0, 1.0)
+        self.scored += 1
+        return ModelPrediction(
+            probability=float(raw[0]),
+            info_ts_ms=int(vector.as_of_ms),
+            available_ms=int(vector.as_of_ms),
+            model_id=self.model.model_id,
+            model_version=self.model.version,
+            target=self.model.target,
+        )
+
+
+async def load_deployed_model() -> Any:
+    """Whatever the registry currently has deployed for event contracts."""
+    from kat.common.enums import MarketType as _MT
+    from kat.db.engine import get_database
+    from kat.models.registry import ModelRegistry
+
+    db = get_database()
+    await db.connect()
+    try:
+        return await ModelRegistry(db).deployed(_MT.EVENT)
+    finally:
+        await db.disconnect()
 
 
 async def build_feed(
@@ -134,6 +201,11 @@ async def main() -> int:
              "this exists to answer 'what would it have done on tighter markets', "
              "not to make a bad market look tradeable.",
     )
+    parser.add_argument(
+        "--no-model",
+        action="store_true",
+        help="run without the deployed model, to see what the rest does alone",
+    )
     args = parser.parse_args()
 
     configure_logging("WARNING")
@@ -157,6 +229,16 @@ async def main() -> int:
             strategy.metadata.params["max_spread_cc"] = args.max_spread_cc
         strategies.append(strategy)
 
+    features = SimFeatureProvider(events, MarketType.EVENT, close_ts_ms=closes)
+    model_provider = None
+    if not args.no_model:
+        model = await load_deployed_model()
+        if model is None:
+            print("  no model deployed; strategies that need one will stand aside")
+        else:
+            print(f"  model    {model.key} target={model.target}")
+            model_provider = DeployedModelProvider(model, features)
+
     risk = EventRiskSettings()
     engine = BacktestEngine(
         feed=feed,
@@ -170,9 +252,8 @@ async def main() -> int:
         # Without this the expiry features are unknown and every strategy that
         # reads them declines every market -- the close times are fetched with
         # the histories and would otherwise be thrown away here.
-        feature_provider=SimFeatureProvider(
-            events, MarketType.EVENT, close_ts_ms=closes
-        ),
+        feature_provider=features,
+        model_provider=model_provider,
     )
     result = engine.run()
     _summarise(result, engine)

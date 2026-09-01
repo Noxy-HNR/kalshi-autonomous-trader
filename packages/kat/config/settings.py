@@ -269,6 +269,23 @@ class EventRiskSettings(BaseSettings):
     max_spread_cc: int = Field(default=300, ge=1, le=5_000)  # $0.03 default
     min_book_depth_qc: int = Field(default=1_000, ge=1)      # 10 contracts
     max_slippage_cc: int = Field(default=100, ge=0, le=5_000)
+    # A coarse pre-filter, not the economic test. min_expected_value_micros
+    # below is the gate that actually decides whether a trade pays, because it
+    # is computed net of a round trip of fees; this one only discards the
+    # obviously pointless before that arithmetic is done.
+    #
+    # Kept at 200 on the evidence of lowering it. A model trained on a
+    # 200-centicent move implies at most a 200-centicent drift, and the edge is
+    # measured against the ask, so it cannot exceed about 150 -- which is why
+    # the drift strategy produced 22,202 intents over a week of banked data and
+    # every one was rejected INSUFFICIENT_EDGE.
+    #
+    # Dropping the bar to 50 let them through, and they lost money: 37 fills,
+    # -0.59% over the week, a Sharpe of -2.5, and $1.51 of fees on a $200
+    # account. The trades below this bar were not being blocked unfairly; they
+    # were being blocked correctly. The bar is not what stops that model
+    # trading profitably -- the model is not good enough to clear it, which is a
+    # different problem and not one a threshold should be moved to hide.
     min_edge_cc: int = Field(default=200, ge=1)              # $0.02 of edge
     min_expected_value_micros: int = Field(default=5_000, ge=0)  # $0.005 after costs
 
