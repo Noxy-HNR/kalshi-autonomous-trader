@@ -322,3 +322,26 @@ class TestTrainingAndSelection:
             if model.feature_importance:
                 assert set(model.feature_importance) <= set(names)
                 assert sum(model.feature_importance.values()) == pytest.approx(1.0, abs=0.01)
+
+
+class TestTheServingPathFindsWhatWasDeployed:
+    """The trainer and the serving path must not have to agree on a string.
+
+    ``InferenceEngine`` defaulted to target "settlement". The trainer builds its
+    target from the label horizon and deploys "forward_move_30m". They never
+    matched, so ``deployed()`` always returned None, the engine published an
+    empty probability map for the life of every run, and ``no_model_probability``
+    became the second largest reason the platform declined to trade -- while
+    every component reported healthy.
+
+    The registry half is exercised against a real database in
+    tests/integration/test_model_registry.py.
+    """
+
+    def test_the_inference_engine_defaults_to_any_target(self):
+        """A default of "settlement" is what made this invisible."""
+        from kat.common.enums import MarketType
+        from kat.models.inference import InferenceEngine
+
+        engine = InferenceEngine(None, MarketType.EVENT)  # type: ignore[arg-type]
+        assert engine.target is None

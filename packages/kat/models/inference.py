@@ -180,13 +180,17 @@ class InferenceEngine:
         registry: ModelRegistry,
         market_type: MarketType,
         *,
-        target: str = "settlement",
+        # None means "serve whatever is deployed for this domain". Naming a
+        # target here is how this engine spent its life looking for
+        # "settlement" while the trainer only ever deploys "forward_move_30m".
+        target: str | None = None,
         max_age_ms: int = DEFAULT_MAX_AGE_MS,
         refresh_interval_s: float = 300.0,
     ) -> None:
         self.registry = registry
         self.market_type = market_type
         self.target = target
+        self._reported_absent = False
         self.max_age_ms = max_age_ms
         self.refresh_interval_s = refresh_interval_s
 
@@ -228,7 +232,20 @@ class InferenceEngine:
                 )
                 self.model = None
                 self.predictions.clear()
+            elif not self._reported_absent:
+                # Said once, because it is otherwise indistinguishable from a
+                # worker that is running fine. Serving nothing was the single
+                # largest reason the platform declined to trade, and it looked
+                # exactly like everything working.
+                self._reported_absent = True
+                log.warning(
+                    "inference.no_model_deployed",
+                    market_type=self.market_type.value,
+                    target=self.target or "(any)",
+                    note="strategies needing a model probability will stand aside",
+                )
             return None
+        self._reported_absent = False
 
         if self.model is None or deployed.key != self.model.key:
             log.info(

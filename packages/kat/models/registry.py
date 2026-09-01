@@ -338,15 +338,43 @@ class ModelRegistry:
         )
         return await self.load(model_id, version)
 
-    async def deployed(self, market_type: MarketType, target: str) -> RegisteredModel | None:
+    async def deployed(
+        self, market_type: MarketType, target: str | None = None
+    ) -> RegisteredModel | None:
+        """The model currently deployed for a domain, and optionally a target.
+
+        ``target=None`` means "whatever is deployed here", which is what a
+        serving path should ask. Requiring the caller to name the target meant
+        two places had to agree on a string derived somewhere else entirely --
+        the trainer builds it from the label horizon, as ``forward_move_30m``,
+        while the inference engine defaulted to ``settlement``. They never
+        matched, so a deployed model was never found and the platform served no
+        predictions at all while reporting nothing wrong.
+
+        Ordered by most recently *deployed* rather than most recently created,
+        so a domain with more than one deployed target serves the latest
+        deployment rather than failing. Deploying writes the row, which is what
+        moves ``updated_at``; two models registered in the same second are
+        otherwise indistinguishable by creation time.
+        """
         async with self.db.session() as session:
+            query = select(ModelRow).where(
+                ModelRow.market_type == market_type.value,
+                ModelRow.deployment_state == DeploymentState.DEPLOYED,
+            )
+            if target is not None:
+                query = query.where(ModelRow.target == target)
             row = (
                 await session.execute(
-                    select(ModelRow).where(
-                        ModelRow.market_type == market_type.value,
-                        ModelRow.target == target,
-                        ModelRow.deployment_state == DeploymentState.DEPLOYED,
-                    )
+                    query.order_by(
+                        ModelRow.updated_at.desc(),
+                        ModelRow.created_at.desc(),
+                        # Version ids carry a time prefix and sort in generation
+                        # order, which is the only tiebreak left when two models
+                        # are registered inside the same clock second -- and the
+                        # database clock's granularity is a second.
+                        ModelRow.version.desc(),
+                    ).limit(1)
                 )
             ).scalar_one_or_none()
         if row is None:

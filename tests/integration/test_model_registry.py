@@ -217,3 +217,57 @@ class TestEndToEnd:
         )
         assert probabilities.shape == (10,)
         assert np.all((probabilities >= 0) & (probabilities <= 1))
+
+
+class TestServingFindsWhatWasDeployed:
+    """The trainer and the serving path must not have to agree on a string.
+
+    ``InferenceEngine`` defaulted to target "settlement" while the trainer builds
+    its target from the label horizon and deploys "forward_move_30m". They never
+    matched, so ``deployed()`` always returned None and the platform served no
+    predictions at all, reporting nothing wrong.
+    """
+
+    async def test_a_deployed_model_is_found_without_naming_its_target(
+        self, registry, trained_models
+    ):
+        registered = await registry.register(
+            usable(trained_models)[0], market_type=MarketType.EVENT, target="forward_move_30m"
+        )
+        await registry.deploy(registered.model_id, registered.version)
+
+        found = await registry.deployed(MarketType.EVENT)
+
+        assert found is not None
+        assert found.model_id == registered.model_id
+        assert found.target == "forward_move_30m"
+
+    async def test_naming_the_wrong_target_still_finds_nothing(
+        self, registry, trained_models
+    ):
+        registered = await registry.register(
+            usable(trained_models)[0], market_type=MarketType.EVENT, target="forward_move_30m"
+        )
+        await registry.deploy(registered.model_id, registered.version)
+
+        assert await registry.deployed(MarketType.EVENT, "settlement") is None
+
+    async def test_nothing_deployed_is_none_not_an_error(self, registry):
+        assert await registry.deployed(MarketType.EVENT) is None
+
+    async def test_the_newest_deployment_wins_when_targets_differ(
+        self, registry, trained_models
+    ):
+        """A domain with two deployed targets serves the latest rather than failing."""
+        first = await registry.register(
+            usable(trained_models)[0], market_type=MarketType.EVENT, target="forward_move_30m"
+        )
+        await registry.deploy(first.model_id, first.version)
+        second = await registry.register(
+            usable(trained_models)[0], market_type=MarketType.EVENT, target="forward_move_60m"
+        )
+        await registry.deploy(second.model_id, second.version)
+
+        found = await registry.deployed(MarketType.EVENT)
+        assert found is not None
+        assert found.target == "forward_move_60m"
