@@ -170,7 +170,7 @@ class ModelDriftStrategy(TradingStrategy):
         # round trip is the same test at every price, and it is what decides
         # where this model can be traded at all rather than a number chosen to
         # produce trades.
-        cost_cc = self._round_trip_cc(mid_cc, quote.spread_cc)
+        cost_cc = self._round_trip_cc(mid_cc, quote.spread_cc)  # exit + fees
         floor_cc = max(self.int_param("min_edge_cc"), cost_cc)
         if edge_cc < floor_cc:
             return self.skip(_SKIP_EDGE_TOO_SMALL)
@@ -217,14 +217,21 @@ class ModelDriftStrategy(TradingStrategy):
 
     @staticmethod
     def _round_trip_cc(mid_cc: int, spread_cc: int) -> int:
-        """Spread once, fee twice, in centicents.
+        """What is left to pay *after* the edge has been measured, in centicents.
 
-        The realised fee rather than the padded estimate: this is asking what
-        the venue charges, not deciding a trade under uncertainty.
+        Not the whole round trip. The edge is ``fair - ask``, and the ask is
+        already half a spread above the mid, so the entry half-spread has been
+        deducted before this floor is applied. Charging the full spread here
+        counts it twice and rejects trades by half a spread more than the venue
+        actually asks for.
+
+        What remains is the exit half-spread and both fees. The realised fee
+        rather than the padded estimate: this is asking what the venue charges,
+        not deciding a trade under uncertainty.
         """
         fee_micros = realised_fee_micros(price_cc=mid_cc, qty_qc=QC_PER_CONTRACT)
         # micros to centicents: 1e-6 USD against 1e-4 USD.
-        return spread_cc + 2 * (fee_micros // 100)
+        return spread_cc // 2 + 2 * (fee_micros // 100)
 
     @staticmethod
     def _threshold_cc(target: str | None) -> int | None:

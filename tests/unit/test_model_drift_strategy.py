@@ -144,8 +144,17 @@ class TestTheEdgeMustCoverWhatCapturingItCosts:
         middle = ModelDriftStrategy._round_trip_cc(5_000, 100)
         edge = ModelDriftStrategy._round_trip_cc(9_500, 100)
 
-        assert middle > 400
+        assert middle > 350
         assert edge < middle / 2
+
+    def test_the_entry_spread_is_not_counted_twice(self):
+        """The edge is fair minus ask, so entry is already paid before this
+        floor applies. Only the exit half and both fees remain."""
+        from kat.common.fixedpoint import QC_PER_CONTRACT
+        from kat.kalshi.fees import realised_fee_micros
+
+        fee_cc = realised_fee_micros(price_cc=5_000, qty_qc=QC_PER_CONTRACT) // 100
+        assert ModelDriftStrategy._round_trip_cc(5_000, 200) == 100 + 2 * fee_cc
 
     def test_a_mid_priced_market_cannot_pay_for_a_small_drift(self):
         """The arithmetic that decides where this model is tradeable at all."""
