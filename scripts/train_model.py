@@ -88,6 +88,23 @@ def _book(bid_cc: int, ask_cc: int, bid_qc: int | None, ask_qc: int | None) -> O
     )
 
 
+async def fetch_settlements_all() -> dict[str, float]:
+    """Every recorded outcome, so training can select markets that have one."""
+    import asyncpg
+
+    dsn = re.sub(r"^postgresql\+\w+", "postgresql", str(AppSettings().database.url))
+    conn = await asyncpg.connect(dsn)
+    try:
+        rows = await conn.fetch("select ticker, result from settlements")
+    finally:
+        await conn.close()
+    return {
+        r["ticker"]: (1.0 if r["result"] == "yes" else 0.0)
+        for r in rows
+        if r["result"] in ("yes", "no")
+    }
+
+
 async def fetch_settlements(tickers: list[str]) -> dict[str, float]:
     """How each market resolved, as 1.0 for YES and 0.0 for NO.
 
@@ -161,8 +178,24 @@ async def fetch_close_times(tickers: list[str]) -> dict[str, int]:
     return closes
 
 
-async def load_histories(hours: int, limit_markets: int) -> dict[str, MarketHistory]:
-    """Rebuild per-market history from the quotes table."""
+async def load_histories(
+    hours: int, limit_markets: int, *, only: set[str] | None = None
+) -> dict[str, MarketHistory]:
+    """Rebuild per-market history from the quotes table.
+
+    ``only`` restricts the candidates to a given set of tickers, which is how
+    settlement training gets a usable dataset. Ranking by quote count and
+    taking the top N is right when every market can be labelled and wrong
+    when only some can: it filled the load with the most-quoted markets, of
+    which just 91 had an outcome, and those happened to be the ones that
+    closed last. 81% of the resulting rows shared a single close date, so
+    every split boundary landed inside one cluster and purging emptied the
+    validation window.
+
+    The outcomes were never the problem. They span six days -- 60 markets
+    closing on the 24th, 179 on the 25th, 91 on the 29th -- and 197 of them
+    clear the quote minimum. They simply were not the markets being loaded.
+    """
     import asyncpg
 
     dsn = re.sub(r"^postgresql\+\w+", "postgresql", str(AppSettings().database.url))
@@ -175,6 +208,7 @@ async def load_histories(hours: int, limit_markets: int) -> dict[str, MarketHist
             from quotes
             where market_type = 'event' and ts >= $1
               and bid_cc is not null and ask_cc is not null
+              and ($5::text[] is null or ticker = any($5::text[]))
             group by ticker
             having count(*) >= $2
                and count(distinct (bid_cc + ask_cc) / 2) >= $3
@@ -182,6 +216,7 @@ async def load_histories(hours: int, limit_markets: int) -> dict[str, MarketHist
             limit $4
             """,
             since, MIN_QUOTES, MIN_DISTINCT_MIDS, limit_markets,
+            sorted(only) if only else None,
         )
         tickers = [r["ticker"] for r in candidates]
         log.info("train.markets_selected", markets=len(tickers), hours=hours)
@@ -511,7 +546,15 @@ async def main() -> int:
 
     configure_logging("WARNING")
 
-    histories = await load_histories(args.hours, args.markets)
+    if args.label == "settlement":
+        # Only markets with an outcome can carry a settlement label, so those are
+        # the ones worth loading. Anything else occupies the market budget and
+        # contributes no rows.
+        settled = set(await fetch_settlements_all())
+        print(f"  settled  {len(settled)} markets have a recorded outcome")
+        histories = await load_histories(args.hours, args.markets, only=settled)
+    else:
+        histories = await load_histories(args.hours, args.markets)
     if not histories:
         print("  no markets with enough price variation to train on.", file=sys.stderr)
         return 1
@@ -525,7 +568,12 @@ async def main() -> int:
         labeller = ForwardMoveLabel(
             horizon_ms=args.horizon_min * 60_000, threshold_cc=args.threshold_cc
         )
-        target = f"forward_move_{args.horizon_min}m"
+        # The threshold is part of what the number means: "will it rise by
+        # more than 2 cents" and "more than 0.5 cents" are different
+        # questions, and a strategy converting the probability into an
+        # expected drift needs to know which one it was asked. Encoding it
+        # in the target is the same lesson as carrying the target at all.
+        target = f"forward_move_{args.horizon_min}m_{args.threshold_cc}cc"
         described = f"move > {args.threshold_cc}cc within {args.horizon_min}m"
     dataset = pipeline.build_dataset(
         list(histories.values()),

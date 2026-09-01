@@ -206,6 +206,7 @@ def build_default_strategies(
     from kat.strategies.event.expiry_drift import ExpiryDriftStrategy
     from kat.strategies.event.mean_reversion import MeanReversionStrategy
     from kat.strategies.event.mispricing import MispricingStrategy
+    from kat.strategies.event.model_drift import ModelDriftStrategy
     from kat.strategies.event.momentum import MomentumStrategy
     from kat.strategies.event.news_reaction import NewsReactionStrategy
     from kat.strategies.perp.basis import PerpBasisStrategy
@@ -214,6 +215,7 @@ def build_default_strategies(
 
     classes: list[Callable[[], Strategy]] = [
         MispricingStrategy,
+        ModelDriftStrategy,
         MeanReversionStrategy,
         MomentumStrategy,
         ExpiryDriftStrategy,
