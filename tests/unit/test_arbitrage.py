@@ -268,3 +268,105 @@ class TestIntentConstruction:
         intents = opportunity_to_intents(opportunity)
         total = sum(i.expected_value_micros or 0 for i in intents)
         assert total == opportunity.expected_value_micros
+
+
+# ---------------------------------------------------------------------------
+# what the scanner keeps
+# ---------------------------------------------------------------------------
+
+
+class TestOnlyEvidenceIsRecorded:
+    """The scanner persisted every pair it looked at, not every one that meant
+    something.
+
+    Measured on the live database: 901,781 rows in seven hours, 2,086 a minute,
+    all ``actioned=False``, all with the reason "no gross edge" and a negative
+    edge, covering the same 1,366 leg sets about 660 times each. Two prices that
+    do not cross is what prices normally do; recording it says only that the
+    scanner ran, which the counters already say.
+    """
+
+    @staticmethod
+    def _candidate(*, gross: int, ev: int, qty_qc: int = 500, reason: str = ""):
+        from decimal import Decimal
+
+        from kat.arbitrage.pricing import PricedOpportunity
+
+        return PricedOpportunity(
+            kind="complementary_pair",
+            legs=[],
+            settlement_micros=1_000_000,
+            gross_edge_micros=gross,
+            fees_micros=0,
+            slippage_micros=0,
+            net_edge_micros=ev,
+            execution_probability=Decimal("0.9"),
+            residual_exposure_micros=0,
+            worst_case_micros=0,
+            expected_value_micros=ev,
+            qty_qc=qty_qc,
+            reason=reason,
+        )
+
+    @staticmethod
+    def _scanner(**kwargs):
+        from kat.arbitrage.scanner import ArbitrageScanner
+        from kat.common.enums import MarketType
+        from kat.common.timeutil import SimulatedClock
+        from kat.marketdata.state import MarketState
+
+        class _Writer:
+            def __init__(self) -> None:
+                self.rows: list[object] = []
+
+            def enqueue(self, row: object, *, critical: bool = False) -> bool:
+                self.rows.append(row)
+                return True
+
+        writer = _Writer()
+        scanner = ArbitrageScanner(
+            market_state=MarketState(MarketType.EVENT),
+            clock=SimulatedClock(0),
+            writer=writer,  # type: ignore[arg-type]
+            **kwargs,
+        )
+        return scanner, writer
+
+    def test_a_pair_that_does_not_cross_is_not_recorded(self):
+        """The exact shape of all 901,781 rows."""
+        scanner, writer = self._scanner()
+        scanner._record(
+            self._candidate(gross=0, ev=-17_100, reason="no gross edge")
+        )
+        assert writer.rows == []
+
+    def test_a_near_miss_is_still_recorded(self):
+        """A real cross that costs took away is the case record_declined is for."""
+        scanner, writer = self._scanner()
+        scanner._record(
+            self._candidate(gross=50_000, ev=-2_000, reason="fees exceed the edge")
+        )
+        assert len(writer.rows) == 1
+        assert writer.rows[0].actioned is False
+
+    def test_an_actionable_opportunity_is_always_recorded(self):
+        scanner, writer = self._scanner()
+        scanner._record(self._candidate(gross=80_000, ev=40_000))
+        assert len(writer.rows) == 1
+        assert writer.rows[0].actioned is True
+
+    def test_record_declined_off_still_keeps_the_actionable_one(self):
+        scanner, writer = self._scanner(record_declined=False)
+        scanner._record(self._candidate(gross=50_000, ev=-2_000))
+        assert writer.rows == []
+        scanner._record(self._candidate(gross=80_000, ev=40_000))
+        assert len(writer.rows) == 1
+
+    def test_a_flood_of_non_crossing_pairs_writes_nothing(self):
+        """The regression, at the rate that produced the table."""
+        scanner, writer = self._scanner()
+        for _ in range(2_086):
+            scanner._record(
+                self._candidate(gross=-100, ev=-17_100, reason="no gross edge")
+            )
+        assert writer.rows == []

@@ -182,10 +182,36 @@ class ArbitrageScanner:
 
     # -- persistence ---------------------------------------------------------
 
+    def _worth_recording(self, candidate: PricedOpportunity) -> bool:
+        """Whether this candidate is evidence of anything.
+
+        ``record_declined`` is for the near misses -- the cases where an
+        arbitrage genuinely existed and costs, size or leg risk took it away.
+        Those are worth keeping: they say what the platform would need to be
+        cheaper or faster to capture.
+
+        A candidate with no gross edge is not a near miss. It is two prices that
+        do not cross, which is what prices normally do, and recording it says
+        only that the scanner ran. That distinction was missing and the cost was
+        not subtle: 901,781 rows accumulated in seven hours, 2,086 a minute,
+        every one of them ``actioned=False`` with the reason "no gross edge" and
+        a negative edge, re-recording the same 1,366 leg sets about 660 times
+        each. Nothing could be found in the table afterwards, which is the point
+        of having it, and the write path carried three million rows a day to say
+        that the market was behaving normally.
+
+        The counters (``scanned``, ``found``, ``declined``) already report that
+        the scanner ran, so nothing observable is lost by keeping quiet here.
+        """
+        if candidate.is_actionable:
+            return True
+        # A real cross that costs killed: this is the near miss worth studying.
+        return self.record_declined and candidate.gross_edge_micros > 0
+
     def _record(self, candidate: PricedOpportunity) -> None:
         if self.writer is None:
             return
-        if not candidate.is_actionable and not self.record_declined:
+        if not self._worth_recording(candidate):
             return
         self.writer.enqueue(
             ArbRow(
