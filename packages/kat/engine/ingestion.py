@@ -508,9 +508,10 @@ _WATCH_MAX_DAYS_TO_CLOSE = 365
 #: How much a market must have traded in a day to be worth watching.
 #:
 #: Movement is necessary and not sufficient: a market that jumped on four
-#: contracts has moved, but there is nobody there to trade against. Fifty
-#: contracts a day is a low bar deliberately -- it excludes the genuinely empty
-#: without pretending this platform needs a deep book on a sub-$250 account.
+#: contracts has moved, but there is nobody there to trade against, and a market
+#: that ticks once an hour yields no realised volatility for a strategy to read.
+#: This is now the *ranking* key as well as a floor, so the bar itself only has
+#: to exclude the genuinely empty.
 _MIN_WATCH_VOLUME_QC = 5_000
 
 #: How far a market's last move must go, as a multiple of what capturing it
@@ -672,7 +673,7 @@ async def select_event_watchlist(
             note="watching the widest-quoted markets instead; nothing may be tradeable",
         )
         quotable = tradeable
-    # Ranked by whether a move pays for itself, then by volume.
+    # Filtered on whether a move can pay for itself, then ranked by activity.
     #
     # Volume-first put the platform in markets that could not produce a winning
     # trade at any skill level: a fortnight of banked quotes has every watched
@@ -683,10 +684,15 @@ async def select_event_watchlist(
     #
     # Volume stays as the tiebreak, because among markets that do move, the one
     # with more depth is the one an order can actually get into.
-    quotable.sort(
-        key=lambda m: (_move_vs_cost(m) or 0.0, float(m.volume_24h_qc or 0)),
-        reverse=True,
-    )
+    # Two different questions, and each was the wrong single answer.
+    #
+    # Volume-first watched markets that tick constantly and cannot pay: 0 of 60
+    # stale, and 0.0% of thirty-minute windows clearing their own cost.
+    # Move-vs-cost-first watched markets that can pay and barely tick: 46 of 60
+    # stale, no realised volatility computable, and again no intents. A market
+    # has to clear its costs *and* be alive; economics decides eligibility,
+    # activity decides priority.
+    quotable.sort(key=lambda m: float(m.volume_24h_qc or 0), reverse=True)
     tradeable = [
         m
         for m in quotable
