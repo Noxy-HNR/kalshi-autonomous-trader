@@ -268,3 +268,59 @@ def test_no_positions_marks_to_nothing() -> None:
     loop._mark_positions()
     assert account.portfolio_value_micros == 0
     assert account.equity_micros == SEED
+
+
+class TestMarkingIsGatedOnTheFeedNotTheMarket:
+    """A quiet market is not an unpriced one.
+
+    On a delta feed, no message means the book has not changed, so the last mid
+    is still the current mid. Marking used to require ``is_fresh`` -- the test
+    for whether a market may be *traded*, which is a stricter question. The two
+    came apart on the real board: the median watched market updates every 489
+    seconds against a 300-second quiet bound, so most positions failed the test,
+    kept a frozen mark, and equity sat at exactly $190.346066 across eighteen
+    open positions indefinitely. Paper equity that cannot move cannot answer the
+    one question paper trading exists to answer.
+    """
+
+    def test_a_quiet_market_is_still_marked(self):
+        loop, state, account = _loop()
+        _quote(state, "Q", 5_000, MARK_T0)
+        account.apply_fill(
+            ticker="Q", qty_qc=1_000, price_cc=5_000, is_buy=True, now_ms=MARK_T0
+        )
+
+        # Well past the quiet bound, but the feed is alive: another market just
+        # spoke, so silence on this one means the book has not changed.
+        later = MARK_T0 + 600_000
+        # In time order: Q moves, goes quiet, and something else keeps the feed
+        # demonstrably alive. Quoting out of order would wind the feed clock back.
+        _quote(state, "Q", 6_000, later - 400_000)
+        _quote(state, "OTHER", 5_000, later)
+        loop.clock = SimulatedClock(later)
+        loop._mark_positions()
+
+        assert not state.is_fresh("Q", now_ms=later), "fixture must be past the bound"
+        assert account.positions["Q"].unrealized_pnl_micros > 0, (
+            "a market that moved in our favour but has been quiet since must "
+            "still be marked at the price it moved to"
+        )
+
+    def test_a_dead_feed_keeps_the_last_mark(self):
+        """The failure that marking on the feed must still refuse."""
+        loop, state, account = _loop()
+        _quote(state, "Q", 5_000, MARK_T0)
+        account.apply_fill(
+            ticker="Q", qty_qc=1_000, price_cc=5_000, is_buy=True, now_ms=MARK_T0
+        )
+        _quote(state, "Q", 6_000, MARK_T0 + 1_000)
+        loop.clock = SimulatedClock(MARK_T0 + 2_000)
+        loop._mark_positions()
+        marked = account.positions["Q"].unrealized_pnl_micros
+
+        # Nothing anywhere for far longer than the feed budget.
+        silent = MARK_T0 + 2_000 + state.feed_max_age_ms + 60_000
+        loop.clock = SimulatedClock(silent)
+        loop._mark_positions()
+
+        assert account.positions["Q"].unrealized_pnl_micros == marked

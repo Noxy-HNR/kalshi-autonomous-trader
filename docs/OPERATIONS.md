@@ -237,6 +237,79 @@ backup into a scratch database.
 
 ---
 
+## Going live
+
+Arming real money is four settings and a restart. Everything below is about
+whether you should, and how to tell afterwards.
+
+### Before you arm
+
+The platform will happily trade real money the moment it is armed, so these are
+your checks, not its.
+
+- [ ] **A paper track record you believe.** Not "it ran without crashing" -- a
+      period long enough to contain losing days, with positions opened *and
+      closed*, and equity above where it started at the end of it. The equity
+      curve is in `balance_snapshots`; the closed trades are in `fills`.
+- [ ] **A deployed model whose gates you have read.** `/api/models` shows what is
+      deployed. The gates it cleared are recorded on the row: test AUC, excess
+      calibration error, and the train-to-test gap. A model that has not cleared
+      them is not deployed, and forcing one is not a supported operation.
+- [ ] **`alembic check` is clean** and a backup has been restored into a scratch
+      database at least once. See Backups above.
+- [ ] **The private key lives outside the repository**, and `git check-ignore -v
+      .env` says the environment file is ignored.
+- [ ] **Position and loss limits sized for the account you are actually risking.**
+      The shipped defaults assume a sub-$250 account: 10% of equity per market,
+      60% total exposure, 2% loss per trade, 5% daily loss, 20% drawdown. On a
+      larger account these are not conservative, they are merely small.
+- [ ] **You have decided what a bad day looks like** and set
+      `KAT_EVENT_RISK__MAX_DAILY_LOSS_PCT` to it. The platform halts there. If you
+      would not accept that loss, the number is wrong.
+
+### Arming
+
+```bash
+# in .env
+KAT_ENVIRONMENT=live
+KAT_LIVE_TRADING_ARMED=true
+KAT_OPERATING_MODE=supervised
+KAT_KALSHI__PROD_CREDENTIALS__API_KEY_ID=...
+KAT_KALSHI__PROD_CREDENTIALS__PRIVATE_KEY_PATH=C:/secrets/kalshi/prod.key
+```
+
+Then restart the engine. Both `environment=live` and `live_trading_armed=true`
+are required, separately and deliberately: neither alone will place an order,
+and the dashboard can set neither.
+
+### Immediately after
+
+```bash
+curl -s http://127.0.0.1:8000/api/overview | jq '{environment, live_armed, can_submit_real_orders, trading_permitted}'
+```
+
+`can_submit_real_orders` must be `true` and `equity_is_simulated` must be
+**absent or false**. If equity still reads as simulated, the platform is running
+on a seeded balance rather than your account, and every size it calculates is
+wrong.
+
+Watch the first fills against the exchange's own record. The fee on a live fill
+comes from Kalshi's payload, not from the model, so a disagreement between
+`fills.fee_micros` and your Kalshi statement is a real problem and worth stopping
+for.
+
+### Starting smaller than you intend to finish
+
+`KAT_OPERATING_MODE=supervised` requires approval before promotion between
+strategy stages, and probation caps a newly promoted strategy at
+`research.probation_capital_pct` of equity. Using both means the first real money
+at risk is a fraction of the account rather than all of it.
+
+Deposit what you are prepared to lose rather than sizing the limits down against
+a larger balance. A percentage limit on a bigger deposit is a bigger loss.
+
+---
+
 ## Emergency
 
 **Stop everything immediately** — from the dashboard Controls tab, or:

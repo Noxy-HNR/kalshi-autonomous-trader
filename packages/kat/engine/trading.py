@@ -530,10 +530,28 @@ class TradingLoop:
         to answer -- is this working -- has no answer until something is sold.
 
         A long holds YES and is worth the YES price; a short holds NO and is
-        worth what is left of the dollar. Positions in markets that have gone
-        stale keep their last mark rather than being written to zero: an absent
-        price is not a price of nothing, and marking to zero would show a total
-        loss every time a feed hiccuped.
+        worth what is left of the dollar.
+
+        Marking is gated on the *feed*, not on the market
+        ------------------------------------------------
+        A quiet market is not an unpriced one. This is a delta feed: no message
+        means the book has not changed, so the last mid is still the current mid
+        and marking a position at it is correct rather than optimistic.
+
+        This used to require ``is_fresh``, which is the test for whether a market
+        may be *traded* -- a stricter question, and rightly so. The two came
+        apart on the real board: the median watched market updates every 489
+        seconds against a 300-second quiet bound, so most positions failed the
+        test, kept a frozen mark, and equity sat at exactly $190.346066 across
+        eighteen open positions for as long as anyone watched it. Paper equity
+        that cannot move cannot answer the one question paper trading exists to
+        answer.
+
+        What is still refused is marking while disconnected. If the feed as a
+        whole has gone silent the last mid is no longer evidence of anything, and
+        the position keeps its previous mark rather than being revalued against a
+        price we can no longer vouch for -- and never written to zero, because an
+        absent price is not a price of nothing.
         """
         if not self.paper_fills or self.account_state is None:
             return
@@ -543,6 +561,7 @@ class TradingLoop:
             return
 
         now_ms = self.clock.now_ms()
+        feed_live = self._feed_live(now_ms)
         total = 0
         for ticker, position in positions.items():
             qty = abs(position.position_qc)
@@ -552,7 +571,7 @@ class TradingLoop:
 
             snapshot = self.market_state.get(ticker)
             mid = snapshot.mid_cc if snapshot is not None else None
-            if mid is None or not self.market_state.is_fresh(ticker, now_ms=now_ms):
+            if mid is None or not feed_live:
                 # Keep the last mark. The position is still worth whatever it was
                 # worth a moment ago; what is missing is our view of it.
                 total += basis + position.unrealized_pnl_micros
