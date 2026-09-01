@@ -286,10 +286,12 @@ class ExecutionEngine(ABC):
         # strategy asked for; the risk engine then resizes, routinely by an order of
         # magnitude. Billing the pre-resize estimate against a post-resize fill
         # charged one 4.32-contract fill the fee for 29 contracts, and over one
-        # session paper paid $101.17 in fees on $20.92 of notional -- 484%, which
-        # silently swamps every edge the strategies were being judged on. A realised
-        # fee is computed from the fill, which is also what the live path does: there
-        # it comes from the exchange's fill payload, never from this model.
+        # session paper paid $101.17 in fees on $2,092.01 of notional -- 4.84%,
+        # against the 1.74% the same book costs once the fee follows the fill. On
+        # edges measured in single cents that difference is most of the edge. A
+        # realised fee is computed from the fill, which is also what the live path
+        # does: there it comes from the exchange's fill payload, never from this
+        # model.
         # realised_ rather than estimate_: an estimate for an unknown schedule is
         # padded by 50% so that an unknown fee cannot make a marginal trade look
         # profitable. That padding belongs to the decision. Charging it would

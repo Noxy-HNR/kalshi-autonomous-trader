@@ -1,11 +1,12 @@
 """A fee is charged for the trade that happened, not the trade that was proposed.
 
 These tests exist because of a real, measured loss. Over one paper session the
-platform recorded 157 fills carrying $101.17 of fees against $20.92 of notional
--- 484%. Nothing was broken in the fee model: ``estimate_fee_micros`` was being
-asked for the quantity the *strategy* requested, and that figure was then billed
-against the much smaller quantity the *risk engine* approved. One fill of 4.32
-contracts was charged the fee for 29.
+platform recorded 157 fills carrying $101.17 of fees against $2,092.01 of
+notional -- 4.84%, where the same book costs 1.74% once the fee follows the fill.
+Nothing was broken in the fee model: ``estimate_fee_micros`` was being asked for
+the quantity the *strategy* requested, and that figure was then billed against
+the much smaller quantity the *risk engine* approved. One fill of 4.32 contracts
+was charged the fee for 29 -- 366,700 micros where the model says 54,700.
 
 The damage is not merely cosmetic. A fee that large swamps every edge a strategy
 could find, so paper P&L stops measuring the strategies at all -- and paper P&L
