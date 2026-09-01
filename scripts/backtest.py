@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import re
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +36,7 @@ from kat.simulation.engine import (
     EventFeed,
     ModelPrediction,
     book_event,
+    trade_event,
 )
 from kat.simulation.features import SimFeatureProvider
 from kat.strategies.event.expiry_drift import ExpiryDriftStrategy
@@ -146,8 +149,54 @@ async def build_feed(
                     seq=seq,
                 )
             )
+    # Prints, not just books. A resting order fills when the market trades
+    # *through* it, so a feed of book snapshots alone can never fill one --
+    # which is not a fact about the market, it is a hole in the measurement.
+    # Without these, 421 resting quotes over a week produced zero fills and
+    # looked like a finding about queue position.
+    seq = await _append_trade_prints(events, set(histories), hours, seq)
+
+    events.sort(key=lambda e: (e.info_ts_ms, e.seq))
     closes = {t: h.close_ts_ms for t, h in histories.items() if h.close_ts_ms}
     return EventFeed(events, name="banked-quotes"), closes, events
+
+
+async def _append_trade_prints(
+    events: list[Any], tickers: set[str], hours: int, seq: int
+) -> int:
+    """Add the banked prints for these markets to the feed."""
+    import asyncpg
+
+    dsn = re.sub(r"^postgresql\+\w+", "postgresql", str(AppSettings().database.url))
+    since = datetime.now(UTC) - timedelta(hours=hours)
+    conn = await asyncpg.connect(dsn)
+    try:
+        rows = await conn.fetch(
+            """
+            select ticker, ts, price_cc, count_qc
+            from trade_prints
+            where market_type = 'event' and ts >= $1 and ticker = any($2::text[])
+              and price_cc is not null and count_qc > 0
+            order by ts
+            """,
+            since, sorted(tickers),
+        )
+    finally:
+        await conn.close()
+
+    for row in rows:
+        seq += 1
+        events.append(
+            trade_event(
+                row["ticker"],
+                info_ts_ms=int(row["ts"].timestamp() * 1000),
+                price_cc=int(row["price_cc"]),
+                qty_qc=int(row["count_qc"]),
+                seq=seq,
+            )
+        )
+    print(f"  prints   {len(rows)} trades across {len(tickers)} markets")
+    return seq
 
 
 def _summarise(result: Any, engine: BacktestEngine) -> None:
