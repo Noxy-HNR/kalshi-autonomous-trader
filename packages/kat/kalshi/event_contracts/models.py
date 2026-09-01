@@ -105,6 +105,10 @@ class EventMarket:
     yes_bid_size_qc: int | None = None
     yes_ask_size_qc: int | None = None
     last_price_cc: int | None = None
+    #: The exchange's previous price for this market. Present on every one
+    #: of the 363 markets sampled from production, and the only realised
+    #: move available at selection time.
+    previous_price_cc: int | None = None
 
     volume_qc: int | None = None
     volume_24h_qc: int | None = None
@@ -141,6 +145,7 @@ class EventMarket:
             yes_bid_size_qc=_opt_count(payload, "yes_bid_size_fp"),
             yes_ask_size_qc=_opt_count(payload, "yes_ask_size_fp"),
             last_price_cc=_opt_price(payload, "last_price_dollars"),
+            previous_price_cc=_opt_price(payload, "previous_price_dollars"),
             volume_qc=_opt_count(payload, "volume_fp"),
             volume_24h_qc=_opt_count(payload, "volume_24h_fp"),
             open_interest_qc=_opt_count(payload, "open_interest_fp"),

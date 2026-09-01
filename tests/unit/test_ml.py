@@ -238,12 +238,42 @@ class TestTrainingAndSelection:
             "not out-of-sample"
         )
 
-    def test_a_memorising_model_is_rejected_by_name(self, trained):
-        _, models, _ = trained
-        result = select_best(models)
+    def test_a_memorising_model_is_rejected(self, trained):
+        """The gate is tested by building a memoriser, not by assuming a shipped
+        family is one.
+
+        This used to name lightgbm and rely on its defaults overfitting the
+        fixture. They were then tuned until they did not -- deliberately, since
+        the untuned defaults were why nothing ever cleared selection -- and the
+        test failed for the best possible reason. Asserting on a family name was
+        the mistake: what needs pinning is that selection refuses a model that
+        has memorised, whichever family produces one.
+        """
+        from kat.models.trainers import train_one
+
+        split, _, names = trained
+        # Unbounded depth on one-sample leaves: a tree that can memorise, will.
+        memoriser = train_one(
+            "random_forest",
+            split,
+            names,
+            max_depth=None,
+            min_samples_leaf=1,
+            max_features=None,
+            n_estimators=200,
+        )
+        assert memoriser.failed is None
+        assert memoriser.overfitting_gap is not None
+        assert memoriser.overfitting_gap > 0.15, (
+            "the fixture no longer lets an unbounded forest memorise, so this "
+            "test is not exercising the gate"
+        )
+
+        result = select_best([memoriser])
         rejected = {c.model.name: c.failures for c in result.candidates if not c.passed}
-        assert "lightgbm" in rejected
-        assert any("memorised" in f for f in rejected["lightgbm"])
+        assert "random_forest" in rejected
+        assert any("memorised" in f for f in rejected["random_forest"])
+        assert not result.deployable
 
     def test_calibration_is_fitted_on_validation_not_test(self, trained):
         """Fitting and scoring calibration on the same data makes every model

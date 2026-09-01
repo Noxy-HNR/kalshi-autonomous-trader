@@ -1491,7 +1491,25 @@ class BacktestEngine:
             model_version=model_version,
             position_qc=position_qc,
             fee_multiplier=self.config.fee_multiplier,
+            # Supplied here for the same reason it is supplied live: on a delta
+            # feed, silence on one market means the book has not changed, and
+            # only something that sees every market at once can tell that from a
+            # dropped connection. Leaving it unset made every backtest stricter
+            # than the platform it is supposed to model -- 1,091,876 book events
+            # produced one intent, with 229,761 strategy-level stale refusals,
+            # so nothing could be validated against it.
+            feed_live=self._feed_live(now_ms),
         )
+
+    def _feed_live(self, now_ms: int) -> bool:
+        """Whether the replayed feed is delivering at this simulated instant.
+
+        The same test the live loop makes, against the same budget, on the same
+        MarketState clock -- which in a replay advances with the events rather
+        than with the wall clock.
+        """
+        age = self.market.feed_age_ms(now_ms=now_ms)
+        return age is not None and age <= self.market.feed_max_age_ms
 
     def _route(
         self, intent: OrderIntent, snap: MarketSnapshot, now_ms: int, strategy: Strategy

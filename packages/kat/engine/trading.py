@@ -698,12 +698,20 @@ class TradingLoop:
     def _feed_live(self, now_ms: int) -> bool:
         """Whether the feed as a whole is currently delivering.
 
-        Measured against the same budget a single market gets, so a feed that
-        has gone quiet for longer than one market may be stale stops vouching
-        for any of them.
+        Measured against ``feed_max_age_ms``, the budget for the question this
+        actually asks. It used to use ``max_age_ms`` -- five seconds, the budget
+        for whether one market is current -- which is a different question, and
+        five seconds of silence across the whole board is quiet rather than
+        broken.
+
+        The loop's own staleness test was moved off that budget; this was left
+        behind, and it is the copy the *strategies* read. So the loop would
+        examine all sixty markets and every strategy would then decline them
+        with ``stale_market_data``: 0 skipped at the top of the cycle and 7,211
+        strategy-level refusals underneath it, in the same run.
         """
         age = self.market_state.feed_age_ms(now_ms=now_ms)
-        return age is not None and age <= self.market_state.max_age_ms
+        return age is not None and age <= self.market_state.feed_max_age_ms
 
     def _position_qc(self, ticker: str) -> int:
         state = self.account_state

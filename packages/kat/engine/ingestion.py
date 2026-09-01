@@ -22,9 +22,21 @@ discarded rather than trusted.
 
 Watchlist
 ---------
-The platform cannot subscribe to every Kalshi market and should not try. The
-watchlist is chosen by liquidity and time-to-close and is refreshed on a slow
-cycle, with subscriptions updated incrementally rather than torn down.
+The platform cannot subscribe to every Kalshi market and should not try, and
+which few it picks decides more about whether it can make money than any
+strategy does. Markets are ranked by how far their last move went *relative to
+what capturing it costs* -- the spread plus two fees -- then filtered for a
+quote, a spread, a settlement date inside a year, and enough volume to trade
+against. Refreshed on a slow cycle, with subscriptions updated incrementally
+rather than torn down.
+
+Ranking by volume was the earlier answer and it was the wrong question. Volume
+says a market traded; it does not say it moved, and it says nothing about the
+toll. Measured over a week of banked quotes, every market the platform was
+watching cleared its own round-trip cost in 0.0% of thirty-minute windows: moves
+of 0 to 12 centicents against costs of 136 to 466. No model and no amount of
+tuning wins there, because the arithmetic is decided before any opinion is
+formed.
 """
 
 from __future__ import annotations
@@ -34,12 +46,18 @@ from datetime import UTC, datetime
 from typing import Any
 
 from kat.common.enums import MarketType
-from kat.common.fixedpoint import Rounding, parse_count_qc, parse_price_cc
+from kat.common.fixedpoint import (
+    CC_PER_DOLLAR,
+    QC_PER_CONTRACT,
+    Rounding,
+    parse_count_qc,
+    parse_price_cc,
+)
 from kat.common.timeutil import Clock
 from kat.db.models import Quote, TradePrint
 from kat.db.writer import AsyncWriter
 from kat.kalshi.event_contracts.rest import EventContractsREST
-from kat.kalshi.fees import FeeSchedule
+from kat.kalshi.fees import FeeSchedule, realised_fee_micros
 from kat.kalshi.perps.rest import PerpsREST
 from kat.kalshi.ws import KalshiWebSocket
 from kat.marketdata.state import MarketState
@@ -487,6 +505,23 @@ _LAST_DEFINITIONS: dict[str, dict[str, Any]] = {}
 #: settle within a year, against 9 within a week.
 _WATCH_MAX_DAYS_TO_CLOSE = 365
 
+#: How much a market must have traded in a day to be worth watching.
+#:
+#: Movement is necessary and not sufficient: a market that jumped on four
+#: contracts has moved, but there is nobody there to trade against. Fifty
+#: contracts a day is a low bar deliberately -- it excludes the genuinely empty
+#: without pretending this platform needs a deep book on a sub-$250 account.
+_MIN_WATCH_VOLUME_QC = 5_000
+
+#: How far a market's last move must go, as a multiple of what capturing it
+#: costs, before it is worth a subscription slot.
+#:
+#: One would be break-even on the last move alone, which is too strict to be
+#: useful as a filter and too generous to be a promise. This is deliberately
+#: modest: it is a screen against markets that are arithmetically unwinnable,
+#: not a prediction that the next move will pay.
+_MIN_MOVE_VS_COST = 0.5
+
 #: How wide a market may be quoted and still be worth a subscription slot.
 #: Deliberately looser than any strategy's own limit: this decides what is worth
 #: watching, not what is worth trading, and a market that drifts in and out of
@@ -512,6 +547,60 @@ def _spread_cc(market: Any) -> int | None:
     if bid is None or ask is None:
         return None
     return ask - bid
+
+
+def _round_trip_cost_cc(market: Any) -> int | None:
+    """What entering and leaving one contract costs, in centicents.
+
+    The spread is paid once across the round trip, and the fee twice. The fee is
+    the part that is easy to forget and impossible to outrun: it is quadratic in
+    price, so it is 175cc a side at $0.50 and 14cc at $0.98. A market's price
+    level therefore decides most of its own tradeability, before any strategy has
+    an opinion about it.
+    """
+    spread = _spread_cc(market)
+    bid, ask = market.yes_bid_cc, market.yes_ask_cc
+    if spread is None or bid is None or ask is None:
+        return None
+    mid = (bid + ask) // 2
+    if mid <= 0 or mid >= CC_PER_DOLLAR:
+        return None
+    # The realised fee, not the estimate. The estimate pads an unknown schedule
+    # by 50% so an unguessable fee cannot make a marginal trade look profitable,
+    # which belongs to a trading decision. This is asking what the venue
+    # actually charges, and inflating it here would reject markets that are
+    # genuinely affordable.
+    fee_micros = realised_fee_micros(price_cc=mid, qty_qc=QC_PER_CONTRACT)
+    # micros to centicents: 1e-6 USD against 1e-4 USD.
+    return spread + 2 * (fee_micros // 100)
+
+
+def _move_vs_cost(market: Any) -> float | None:
+    """A market's most recent realised move, as a multiple of its round trip.
+
+    Below 1.0 the exchange takes more than the market moved, and no strategy --
+    no model, no amount of tuning -- can make money there. This is arithmetic
+    about the venue rather than a view about the market, which is why it belongs
+    in the decision about what is worth watching at all.
+
+    Measured over a week of banked quotes: every market the platform was
+    watching scored 0.0% of 30-minute windows clearing its own cost, with moves
+    of 0 to 12cc against costs of 136 to 466cc. The ones that did clear it were
+    never selected, because the ranking asked for volume and a spread cap and
+    those are not the same question.
+    """
+    last, previous = market.last_price_cc, market.previous_price_cc
+    cost = _round_trip_cost_cc(market)
+    if not last or not previous or not cost:
+        # A zero previous price is the exchange saying it has none, not a market
+        # that traded at nothing: 9,752 of 26,479 live markets report exactly 0.
+        # Read literally it manufactures a full-dollar move out of an absent
+        # number, and since the score is a ratio, those markets then sort to the
+        # top of the watchlist -- the missing value becoming the most attractive
+        # one, which is the failure this codebase refuses everywhere else. A
+        # live contract cannot trade at $0.0000 anyway.
+        return None
+    return abs(last - previous) / cost
 
 
 def last_event_definitions() -> dict[str, dict[str, Any]]:
@@ -583,7 +672,37 @@ async def select_event_watchlist(
             note="watching the widest-quoted markets instead; nothing may be tradeable",
         )
         quotable = tradeable
-    quotable.sort(key=lambda m: (m.volume_24h_qc or 0, -(_spread_cc(m) or 10_000)), reverse=True)
+    # Ranked by whether a move pays for itself, then by volume.
+    #
+    # Volume-first put the platform in markets that could not produce a winning
+    # trade at any skill level: a fortnight of banked quotes has every watched
+    # market clearing its own round-trip cost in 0.0% of 30-minute windows.
+    # Volume says a market traded; it does not say it moved, and it says nothing
+    # at all about the toll. A market whose last move was smaller than the cost
+    # of capturing it is not a hard market, it is an unwinnable one.
+    #
+    # Volume stays as the tiebreak, because among markets that do move, the one
+    # with more depth is the one an order can actually get into.
+    quotable.sort(
+        key=lambda m: (_move_vs_cost(m) or 0.0, float(m.volume_24h_qc or 0)),
+        reverse=True,
+    )
+    tradeable = [
+        m
+        for m in quotable
+        if (_move_vs_cost(m) or 0.0) >= _MIN_MOVE_VS_COST
+        and (m.volume_24h_qc or 0) >= _MIN_WATCH_VOLUME_QC
+    ]
+    if tradeable:
+        quotable = tradeable
+    else:
+        log.warning(
+            "ingestion.no_market_covers_its_costs",
+            domain="event",
+            considered=len(quotable),
+            min_move_vs_cost=_MIN_MOVE_VS_COST,
+            note="watching the best of a bad board; expect very few intents",
+        )
     picked = quotable[:limit]
     chosen = [m.ticker for m in picked]
     # Kept rather than discarded: these objects already carry the title, rules
