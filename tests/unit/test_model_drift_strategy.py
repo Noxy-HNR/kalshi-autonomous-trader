@@ -129,3 +129,45 @@ class TestTheDriftIsSignedAndConservative:
         s = ModelDriftStrategy()
         assert s.generate(_ctx(probability=0.99, target="forward_move_30m_50cc")) == []
         assert _skip(s) == "drift_below_threshold"
+
+
+class TestTheEdgeMustCoverWhatCapturingItCosts:
+    """The fee is quadratic, so the bar is a function of price.
+
+    A round trip runs about 450 centicents mid-board and about 130 at the
+    extremes, against a drift this model can never push past its own threshold.
+    A fixed floor is wrong in both directions: mid-board it admits trades the
+    fees eat, at the edges it blocks trades that comfortably pay.
+    """
+
+    def test_the_cost_collapses_at_the_extremes(self):
+        middle = ModelDriftStrategy._round_trip_cc(5_000, 100)
+        edge = ModelDriftStrategy._round_trip_cc(9_500, 100)
+
+        assert middle > 400
+        assert edge < middle / 2
+
+    def test_a_mid_priced_market_cannot_pay_for_a_small_drift(self):
+        """The arithmetic that decides where this model is tradeable at all."""
+        s = ModelDriftStrategy()
+        # Total conviction, 200cc threshold: the largest drift possible is 200,
+        # and a round trip at $0.50 costs more than twice that.
+        assert s.generate(
+            _ctx(probability=0.999, target="forward_move_30m_200cc", mid_cc=5_000)
+        ) == []
+        assert _skip(s) == "drift_below_threshold"
+
+    def test_the_same_conviction_pays_at_the_extremes(self):
+        """Where the fee is small, the same drift clears its cost."""
+        s = ModelDriftStrategy()
+        intents = s.generate(
+            _ctx(probability=0.999, target="forward_move_30m_900cc", mid_cc=9_400)
+        )
+        assert intents, f"expected an intent, skipped with {_skip(s)}"
+
+    def test_the_floor_is_never_below_the_configured_minimum(self):
+        """Cost-awareness raises the bar; it must not lower it."""
+        s = ModelDriftStrategy()
+        # A market so cheap to trade that cost < min_edge_cc; min_edge still binds.
+        cheap = ModelDriftStrategy._round_trip_cc(9_900, 10)
+        assert cheap < s.int_param("min_edge_cc")

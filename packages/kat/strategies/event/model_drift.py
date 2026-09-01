@@ -46,7 +46,8 @@ from __future__ import annotations
 import re
 
 from kat.common.enums import MarketType, OutcomeSide
-from kat.common.fixedpoint import CC_PER_DOLLAR
+from kat.common.fixedpoint import CC_PER_DOLLAR, QC_PER_CONTRACT
+from kat.kalshi.fees import realised_fee_micros
 from kat.risk.types import OrderIntent
 from kat.strategies.base import StrategyContext, StrategyParam
 from kat.strategies.common import TradingStrategy, clamp_price_cc
@@ -156,7 +157,22 @@ class ModelDriftStrategy(TradingStrategy):
         no_edge_cc = (CC_PER_DOLLAR - fair_value_cc) - quote.no_ask_cc
         side = OutcomeSide.YES if yes_edge_cc >= no_edge_cc else OutcomeSide.NO
         edge_cc = max(yes_edge_cc, no_edge_cc)
-        if edge_cc < self.int_param("min_edge_cc"):
+
+        # The edge has to beat what capturing it costs, and that cost is a
+        # function of price rather than a constant. The fee is quadratic --
+        # 175 centicents a side at $0.50, 33 at $0.95, 14 at $0.98 -- so a
+        # round trip runs about 450 centicents mid-board and about 130 at the
+        # edges, against a drift this model can never push past its own 200.
+        #
+        # A fixed floor gets this wrong in both directions: at mid prices it
+        # lets through trades the fees will eat, and at the extremes it blocks
+        # trades that comfortably pay. Requiring the edge to cover the actual
+        # round trip is the same test at every price, and it is what decides
+        # where this model can be traded at all rather than a number chosen to
+        # produce trades.
+        cost_cc = self._round_trip_cc(mid_cc, quote.spread_cc)
+        floor_cc = max(self.int_param("min_edge_cc"), cost_cc)
+        if edge_cc < floor_cc:
             return self.skip(_SKIP_EDGE_TOO_SMALL)
 
         book = ctx.market.book
@@ -198,6 +214,17 @@ class ModelDriftStrategy(TradingStrategy):
             },
         )
         return self.emit([intent])
+
+    @staticmethod
+    def _round_trip_cc(mid_cc: int, spread_cc: int) -> int:
+        """Spread once, fee twice, in centicents.
+
+        The realised fee rather than the padded estimate: this is asking what
+        the venue charges, not deciding a trade under uncertainty.
+        """
+        fee_micros = realised_fee_micros(price_cc=mid_cc, qty_qc=QC_PER_CONTRACT)
+        # micros to centicents: 1e-6 USD against 1e-4 USD.
+        return spread_cc + 2 * (fee_micros // 100)
 
     @staticmethod
     def _threshold_cc(target: str | None) -> int | None:
