@@ -47,6 +47,7 @@ from kat.features.pipeline import (
     FeaturePipeline,
     ForwardMoveLabel,
     MarketHistory,
+    SettlementLabel,
     TickerObservation,
     bars_from_mid_path,
 )
@@ -85,6 +86,31 @@ def _book(bid_cc: int, ask_cc: int, bid_qc: int | None, ask_qc: int | None) -> O
         yes_levels=[(bid_cc, bid_qc or 10_000)],
         no_levels=[(10_000 - ask_cc, ask_qc or 10_000)],
     )
+
+
+async def fetch_settlements(tickers: list[str]) -> dict[str, float]:
+    """How each market resolved, as 1.0 for YES and 0.0 for NO.
+
+    Only markets that actually resolved appear. A market still open, or one that
+    voided, has no outcome and must not be given one: SettlementLabel returns
+    None for it and the row is dropped rather than labelled with a guess.
+    """
+    import asyncpg
+
+    dsn = re.sub(r"^postgresql\+\w+", "postgresql", str(AppSettings().database.url))
+    conn = await asyncpg.connect(dsn)
+    try:
+        rows = await conn.fetch(
+            "select ticker, result from settlements where ticker = any($1::text[])",
+            tickers,
+        )
+    finally:
+        await conn.close()
+    return {
+        r["ticker"]: (1.0 if r["result"] == "yes" else 0.0)
+        for r in rows
+        if r["result"] in ("yes", "no")
+    }
 
 
 async def fetch_close_times(tickers: list[str]) -> dict[str, int]:
@@ -200,6 +226,7 @@ async def load_histories(hours: int, limit_markets: int) -> dict[str, MarketHist
 
     usable = [t for t, obs in books.items() if len(obs) >= MIN_QUOTES]
     closes = await fetch_close_times(usable)
+    settlements = await fetch_settlements(usable)
 
     histories: dict[str, MarketHistory] = {}
     for ticker in usable:
@@ -216,6 +243,10 @@ async def load_histories(hours: int, limit_markets: int) -> dict[str, MarketHist
             bars=bars_from_mid_path(mids[ticker], period_ms=60_000),
             tickers=ticks.get(ticker, []),
             close_ts_ms=close_ms,
+            # None where the market has not resolved. SettlementLabel drops
+            # those rows rather than labelling them, which is the difference
+            # between "we do not know yet" and "it resolved NO".
+            settlement_yes=settlements.get(ticker),
         )
     log.info(
         "train.histories_built",
@@ -401,6 +432,16 @@ async def main() -> int:
              "all', which is not the question a strategy paying a spread asks.",
     )
     parser.add_argument("--step-min", type=int, default=1, help="minutes between decision times")
+    parser.add_argument(
+        "--label",
+        choices=("forward_move", "settlement"),
+        default="forward_move",
+        help="what to predict. 'settlement' is the chance the contract resolves "
+             "YES, which is the only target MispricingStrategy can read: it "
+             "converts the probability into a fair value for the contract. "
+             "'forward_move' predicts a mid move and must never be fed to that "
+             "strategy, which is why the target now travels with the model.",
+    )
     parser.add_argument("--deploy", action="store_true", help="deploy if it clears the gates")
     parser.add_argument(
         "--no-walk-forward",
@@ -421,19 +462,27 @@ async def main() -> int:
         return 1
 
     pipeline = FeaturePipeline(EVENT_FEATURE_SET)
+    if args.label == "settlement":
+        labeller: Any = SettlementLabel()
+        target = "settlement_yes"
+        described = "resolved YES"
+    else:
+        labeller = ForwardMoveLabel(
+            horizon_ms=args.horizon_min * 60_000, threshold_cc=args.threshold_cc
+        )
+        target = f"forward_move_{args.horizon_min}m"
+        described = f"move > {args.threshold_cc}cc within {args.horizon_min}m"
     dataset = pipeline.build_dataset(
         list(histories.values()),
-        labeller=ForwardMoveLabel(
-            horizon_ms=args.horizon_min * 60_000, threshold_cc=args.threshold_cc
-        ),
+        labeller=labeller,
         step_ms=args.step_min * 60_000,
-        name=f"event_forward_move_{args.horizon_min}m",
+        name=f"event_{target}",
     )
 
     print()
     print(f"  markets  {len(set(dataset.tickers))}")
     print(f"  dataset  rows={dataset.n_rows} features={dataset.n_features}")
-    print(f"  label    move > {args.threshold_cc}cc within {args.horizon_min}m")
+    print(f"  label    {described}")
     print(f"  positive rate: {dataset.positive_rate:.4f}")
     if dataset.n_rows < 500:
         print("  too few rows to train on honestly; collect more data.", file=sys.stderr)
@@ -504,7 +553,11 @@ async def main() -> int:
         registered = await registry.register(
             winner,
             market_type=MarketType.EVENT,
-            target=f"forward_move_{args.horizon_min}m",
+            # The same target the dataset was labelled with. Hard-coding
+            # the forward-move name here would register a settlement model
+            # under a target it does not predict, and the whole point of
+            # the field is that consumers can tell what the number means.
+            target=target,
             dataset_id=dataset.dataset_id,
             feature_set_id=EVENT_FEATURE_SET.feature_set_id,
         )
