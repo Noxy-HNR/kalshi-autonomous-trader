@@ -419,6 +419,61 @@ def _report_walk_forward(dataset: Any, *, folds: int) -> None:
             "features or firmer regularisation might."
         )
 
+def _split(dataset: Any, args: Any) -> Any:
+    """Split the dataset, purging label overlap across the boundaries.
+
+    ``temporal_split`` orders by time and cuts, which is right for a fixed
+    horizon and wrong for settlement. A settlement label is not knowable until
+    the market closes, so two rows observed days apart about the same market
+    carry the *same* outcome. Cut between them and the training set contains the
+    test set's answers -- and a market watched for a week contributes dozens of
+    such rows.
+
+    ``chronological_split`` drops rows whose label reaches past the boundary and
+    leaves a gap after it, which is what makes the test score mean anything. Its
+    docstring asks for an explicit embargo when the horizon is variable, which is
+    exactly the settlement case; a day is used, being longer than the gap between
+    consecutive observations of one market and shorter than the history.
+    """
+    from kat.features.pipeline import chronological_split
+    from kat.models.trainers import SplitResult
+
+    if args.label != "settlement":
+        return temporal_split(dataset.X, dataset.y, timestamps=dataset.as_of_ms)
+
+    from kat.common.errors import DataQualityError
+
+    try:
+        splits = chronological_split(dataset, embargo_ms=24 * 60 * 60 * 1000)
+    except DataQualityError as exc:
+        # Not a crash: the data cannot be split honestly, and saying so is the
+        # correct outcome. Measured on the first settlement dataset, purging
+        # alone emptied the validation split even with a zero embargo -- almost
+        # every observation's label resolved after the test window began,
+        # because the settled markets all closed near the end of the history
+        # while observations span the whole of it. A model fitted on that would
+        # be scored on labels its training rows already contained.
+        print(f"\n  cannot split this dataset honestly: {exc}", file=sys.stderr)
+        print(
+            "  Settlement labels need markets that resolve *throughout* the "
+            "history, not all at the end of it. The settlement recorder runs "
+            "continuously, so this becomes possible as more markets close.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from exc
+    print(
+        f"  purged   {splits.purged_rows} rows whose label crossed a split "
+        f"boundary (embargo {splits.embargo_ms // 3_600_000}h)"
+    )
+    return SplitResult(
+        X_train=splits.train.X, y_train=splits.train.y,
+        X_val=splits.validation.X, y_val=splits.validation.y,
+        X_test=splits.test.X, y_test=splits.test.y,
+        train_end_index=int(splits.train.y.size),
+        val_end_index=int(splits.train.y.size + splits.validation.y.size),
+    )
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser(description="Train and optionally deploy a model.")
     parser.add_argument("--hours", type=int, default=96, help="how much history to use")
@@ -488,7 +543,7 @@ async def main() -> int:
         print("  too few rows to train on honestly; collect more data.", file=sys.stderr)
         return 1
 
-    split = temporal_split(dataset.X, dataset.y, timestamps=dataset.as_of_ms)
+    split = _split(dataset, args)
     print(
         f"  split    train={_balance(split.y_train)}  "
         f"val={_balance(split.y_val)}  test={_balance(split.y_test)}"
