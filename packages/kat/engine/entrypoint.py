@@ -47,6 +47,7 @@ from kat.engine.ingestion import (
 )
 from kat.engine.lifecycle import Application, Phase, ServiceComponent
 from kat.engine.persistence import restore_event_account, snapshot_event_account
+from kat.engine.settlements import SettlementRecorder
 from kat.engine.trading import TradingLoop
 from kat.execution.event_exec import EventExecutionEngine
 from kat.execution.perp_exec import PerpExecutionEngine
@@ -569,6 +570,20 @@ class Platform:
         self.app.register(
             ServiceComponent("risk-overrides", start=self._restore_risk_overrides)
         )
+        if self.event_rest is not None:
+            # Without this the settlements table stays empty, and an empty
+            # settlements table is why no model can be trained on the target the
+            # strategies actually read. See kat.engine.settlements.
+            self.settlements = SettlementRecorder(
+                self.event_rest,
+                writer=self.app.writer,
+                database=self.app.database,
+            )
+            self.app.register(
+                ServiceComponent(
+                    "settlements", run=self.settlements.run, critical=False
+                )
+            )
         self.app.register(
             ServiceComponent(
                 "account-snapshot", run=self._snapshot_paper_account, critical=False
