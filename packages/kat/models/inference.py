@@ -326,11 +326,15 @@ class InferenceEngine:
             # Publish an empty map rather than leaving the previous one in
             # place: no model means no view, and the loop must see that.
             loop.model_probabilities = {}
+            loop.model_target = None
             return 0
 
         self.score(vectors, now_ms)
         entries = self.loop_entries(now_ms)
         loop.model_probabilities = entries
+        # Published beside the numbers, because a probability whose subject is
+        # unknown cannot be used safely by anything downstream.
+        loop.model_target = self.model.target if self.model else None
         return len(entries)
 
     async def run(self, loop: Any, *, interval_s: float = 5.0) -> None:

@@ -169,6 +169,10 @@ class StrategyContext:
     features: dict[str, float] = field(default_factory=dict)
     # Model probability for this market, when a model is deployed for it.
     model_probability: float | None = None
+    #: What ``model_probability`` is a probability *of* -- the deployed model's
+    #: target. A strategy that reads the number without checking this is not
+    #: reading a probability, it is reading a float.
+    model_target: str | None = None
     model_id: str | None = None
     model_version: str | None = None
     # Current signed position in this market, in centi-contracts.

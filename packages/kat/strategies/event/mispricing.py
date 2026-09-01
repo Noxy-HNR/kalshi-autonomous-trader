@@ -53,6 +53,13 @@ from kat.strategies.proposal import (
 __all__ = ["MispricingStrategy"]
 
 _SKIP_NO_MODEL = "no_model_probability"
+_SKIP_WRONG_TARGET = "model_answers_a_different_question"
+
+#: The only target this strategy can read. It converts a probability into a
+#: fair value and compares that to the ask, so the number has to be the
+#: probability the contract *resolves YES*. Anything else is a different
+#: question wearing the same units.
+_REQUIRED_TARGET = "settlement_yes"
 _SKIP_PRICE_BAND = "price_outside_band"
 _SKIP_EDGE_TOO_SMALL = "edge_below_threshold"
 
@@ -117,6 +124,21 @@ class MispricingStrategy(TradingStrategy):
         probability = ctx.model_probability
         if probability is None or not 0.0 < probability < 1.0:
             return self.skip(_SKIP_NO_MODEL)
+
+        # A probability of *what*. This strategy turns the number into a fair
+        # value for the contract, so it must be the chance the contract resolves
+        # YES. A forward-move model answers "will the mid travel 50 centicents in
+        # the next half hour", which is a small number for almost every market
+        # and has nothing to do with what the contract is worth.
+        #
+        # Read as a fair value it made every expensive market look wildly
+        # overpriced, because a low move-probability became a low fair value: the
+        # platform bought NO on ten markets in a row at prices from $0.54 to
+        # $0.91, every one of them justified by a number that was never about
+        # settlement. That is not an edge, it is a unit error that happens to
+        # produce trades, which is worse than no trades at all.
+        if ctx.model_target != _REQUIRED_TARGET:
+            return self.skip(_SKIP_WRONG_TARGET)
 
         quote, reason = screen_event_market(
             ctx,

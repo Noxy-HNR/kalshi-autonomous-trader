@@ -162,6 +162,9 @@ class TradingLoop:
         ) or {}
         #: Model probabilities keyed by ticker, refreshed by the inference worker.
         self.model_probabilities: dict[str, tuple[float, str, str]] = {}
+        #: The deployed model's target, published beside the probabilities. The
+        #: same for every ticker, so it is not repeated in each entry.
+        self.model_target: str | None = None
         #: Research/news signals keyed by ticker, already time-filtered.
         self.research: dict[str, dict[str, Any]] = {}
         #: Cross-market intent producers; see :meth:`add_intent_source`.
@@ -697,6 +700,7 @@ class TradingLoop:
             market=snapshot,
             features=self.features.get(snapshot.ticker, {}),
             model_probability=probability[0] if probability else None,
+            model_target=self.model_target,
             model_id=probability[1] if probability else None,
             model_version=probability[2] if probability else None,
             position_qc=self._position_qc(snapshot.ticker),
