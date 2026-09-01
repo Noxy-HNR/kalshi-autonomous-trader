@@ -237,7 +237,14 @@ class EventRiskEngine:
         position = state.positions.get(intent.ticker) or EventPositionState(
             ticker=intent.ticker, event_ticker=event_ticker
         )
-        is_reducing = intent.reduce_only or self._is_reducing(intent, position)
+        # Not ``intent.reduce_only or ...``. That flag is set by the strategy, and
+        # this engine exists precisely so a strategy cannot authorise its own
+        # risk; an intent asserting reduce_only with no position, or with a size
+        # far past it, would have skipped every check below on its own say-so.
+        # The flag still travels to the exchange on the order, where it is
+        # enforced by something that is not us. What earns the exemption here is
+        # the position we can see and the size of the order against it.
+        is_reducing = self._is_reducing(intent, position)
 
         # --- 2. loss budgets: these halt trading, not just resize it --------
         if not is_reducing:
@@ -535,13 +542,45 @@ class EventRiskEngine:
 
     @staticmethod
     def _is_reducing(intent: OrderIntent, position: EventPositionState) -> bool:
-        """True when this order moves an existing position toward flat."""
+        """True when this order *can only* move an existing position toward flat.
+
+        Size is part of the question, not just direction. Being classified as
+        reducing exempts an order from every check in sections 2 and 3 -- the
+        daily-loss and drawdown halts, the order-rate limit, available capital,
+        max loss per trade, the per-market and portfolio exposure caps, the
+        correlated-event cap, the per-order notional cap, the open-position
+        count, minimum edge and minimum expected value. Only the freshness gate
+        survives. That exemption is right for an exit: closing a position must
+        never be blocked by the limits that govern opening one, or a halted
+        platform could not get out of the trade that halted it.
+
+        It was previously granted on direction alone, so *any* opposite-side buy
+        qualified however large. One contract of residual YES bought an unbounded
+        NO position with nothing checked: measured, an account holding a single
+        contract with half a cent of equity, $100 of losses on the day, a
+        near-total drawdown and ten thousand orders in the minute was approved
+        for 5,000 contracts -- $2,500 of notional against a $25 per-order cap --
+        with one check recorded. This is reachable from the shipped strategies
+        rather than hypothetical: ``headroom_qc(..., increases=False)`` returns
+        ``cap + position_qc`` precisely so a reversing signal can close and
+        re-open in one intent.
+
+        An order larger than the position it opposes is a reversal: part of it
+        closes, and the rest opens new risk on the other side. That is an entry,
+        and it faces what entries face. The whole order is then measured rather
+        than only its excess, which slightly overstates the new risk -- the safe
+        direction, and far simpler than splitting one intent into two verdicts.
+        """
         if position.position_qc == 0:
             return False
         holding_yes = position.position_qc > 0
         buying_yes = intent.outcome_side is OutcomeSide.YES
-        # Buying the opposite outcome offsets the position.
-        return holding_yes != buying_yes
+        if holding_yes == buying_yes:
+            # Same side: this adds to the position.
+            return False
+        # Buying the opposite outcome offsets the position, but only up to the
+        # size actually held.
+        return intent.qty_qc <= abs(position.position_qc)
 
     @staticmethod
     def _edge_cc(intent: OrderIntent) -> int:
