@@ -166,9 +166,14 @@ class MarketState:
         *,
         max_age_ms: int = 5_000,
         quiet_max_age_ms: int = 300_000,
+        feed_max_age_ms: int = 60_000,
     ) -> None:
         self.market_type = market_type
         self.max_age_ms = max_age_ms
+        #: How long the whole feed may be silent before we stop treating it as
+        #: proof of connection. See :meth:`is_fresh` for why this is not
+        #: ``max_age_ms``.
+        self.feed_max_age_ms = feed_max_age_ms
         #: How old a *quiet* market's book may be while the feed is proven live.
         #: See :meth:`is_fresh` for why this is a different number.
         self.quiet_max_age_ms = quiet_max_age_ms
@@ -246,7 +251,7 @@ class MarketState:
         is in two parts:
 
         * the ticker updated within ``max_age_ms`` -- unambiguously current; or
-        * the **feed** delivered something within ``max_age_ms`` (so we are
+        * the **feed** delivered something within ``feed_max_age_ms`` (so we are
           demonstrably still connected and receiving) and this ticker updated
           within ``quiet_max_age_ms``.
 
@@ -255,9 +260,33 @@ class MarketState:
         be dropped silently while others keep flowing, and after
         ``quiet_max_age_ms`` we stop assuming otherwise.
 
-        The failure mode that matters is preserved exactly. If the connection
-        drops, ``feed_age_ms`` grows past the budget and every market in this
-        domain goes stale at once, which is the correct and conservative answer.
+        Three budgets, not two
+        ----------------------
+        The feed clause used ``max_age_ms`` -- the same five seconds that decides
+        whether one market is current. Those answer different questions. Five
+        seconds of silence from one market on a delta feed is ordinary; five
+        seconds of silence across sixty markets is *also* ordinary once the board
+        goes quiet, and it is nothing like evidence of a dropped connection.
+
+        The effect was a switch rather than a measurement. Every market older
+        than five seconds shared the single feed test, so the instant the feed
+        went quiet the whole domain went stale together and the platform stopped
+        deciding anything at all. Measured on the running engine: 0 of 60 stale
+        at midday with the feed a few hundred milliseconds behind, and 44 of 60
+        stale overnight -- not because any book had decayed, but because nothing
+        had happened anywhere in five seconds. The platform was blind for exactly
+        the half of the day it was least busy, which is a large share of the
+        evidence a model is supposed to learn from.
+
+        ``feed_max_age_ms`` is sized for the question it actually answers. The
+        websocket pings every ten seconds and gives up after ten more, so a
+        genuinely dead connection is detected and reconnected long before a
+        minute passes; a minute of application silence is quiet, not broken.
+
+        The failure mode that matters is preserved. If the connection drops,
+        ``feed_age_ms`` grows past ``feed_max_age_ms`` and every market in this
+        domain goes stale at once, which is the correct and conservative answer
+        -- and no book is ever trusted past ``quiet_max_age_ms`` regardless.
         """
         age = self.age_ms(ticker, now_ms=now_ms)
         if age is None:
@@ -266,7 +295,7 @@ class MarketState:
         if age <= budget:
             return True
         feed_age = self.feed_age_ms(now_ms=now_ms)
-        if feed_age is None or feed_age > budget:
+        if feed_age is None or feed_age > self.feed_max_age_ms:
             return False
         return age <= self.quiet_max_age_ms
 

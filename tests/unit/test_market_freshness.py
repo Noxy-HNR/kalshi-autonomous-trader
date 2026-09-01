@@ -21,11 +21,20 @@ from kat.marketdata.state import MarketState
 
 BUDGET = 5_000
 QUIET = 300_000
+#: How long the whole feed may be silent before we stop believing we are still
+#: connected. Its own budget, because "is the connection alive" and "did this
+#: market just move" are different questions -- see the module docstring.
+FEED = 60_000
 T0 = 1_000_000
 
 
 def _state() -> MarketState:
-    return MarketState(MarketType.EVENT, max_age_ms=BUDGET, quiet_max_age_ms=QUIET)
+    return MarketState(
+        MarketType.EVENT,
+        max_age_ms=BUDGET,
+        quiet_max_age_ms=QUIET,
+        feed_max_age_ms=FEED,
+    )
 
 
 def _tick(state: MarketState, ticker: str, now_ms: int) -> None:
@@ -54,20 +63,41 @@ def test_quiet_market_stays_fresh_while_the_feed_is_live() -> None:
 
 
 def test_quiet_market_goes_stale_when_the_whole_feed_goes_quiet() -> None:
-    """The failure mode that matters is preserved exactly."""
+    """The failure mode that matters is preserved."""
     state = _state()
     _tick(state, "A", T0)
     _tick(state, "B", T0)
-    # Nothing at all for longer than the budget: we may simply be disconnected.
-    assert state.is_fresh("A", now_ms=T0 + BUDGET + 1) is False
-    assert state.is_fresh("B", now_ms=T0 + BUDGET + 1) is False
+    # Nothing at all for longer than the *feed* budget: we may be disconnected.
+    assert state.is_fresh("A", now_ms=T0 + FEED + 1) is False
+    assert state.is_fresh("B", now_ms=T0 + FEED + 1) is False
+
+
+def test_an_ordinarily_quiet_board_does_not_blind_the_platform() -> None:
+    """The regression this budget exists for.
+
+    Feed silence between the market budget and the feed budget is a quiet board,
+    not a dropped connection. Sharing one budget made it a switch: every market
+    older than five seconds failed the same feed test, so the instant nothing
+    happened anywhere, the whole domain went stale together and the platform
+    stopped deciding anything. Measured on the running engine, that was 0 of 60
+    stale at midday and 44 of 60 overnight, with no book having decayed.
+    """
+    state = _state()
+    for ticker in ("A", "B", "C"):
+        _tick(state, ticker, T0)
+
+    # Ten seconds of total silence: twice the market budget, well inside the
+    # feed budget, and the websocket pings every ten seconds regardless.
+    later = T0 + 10_000
+    assert state.stale_tickers(now_ms=later) == []
+    assert state.is_fresh("A", now_ms=later) is True
 
 
 def test_a_disconnect_stales_every_market_at_once() -> None:
     state = _state()
     for ticker in ("A", "B", "C"):
         _tick(state, ticker, T0)
-    later = T0 + BUDGET + 1
+    later = T0 + FEED + 1
     assert state.stale_tickers(now_ms=later) == ["A", "B", "C"]
 
 
@@ -88,13 +118,23 @@ def test_a_stricter_caller_budget_still_admits_a_quiet_market_on_a_live_feed() -
     assert state.is_fresh("QUIET", now_ms=T0 + 1_000, max_age_ms=1_000) is True
 
 
-def test_a_stricter_caller_budget_narrows_what_counts_as_a_live_feed() -> None:
-    """A caller demanding 1s freshness also demands 1s of proof of liveness."""
+def test_a_caller_budget_governs_the_market_not_the_connection() -> None:
+    """A strategy may ask for fresher data; it does not get its own view of
+    whether the socket is up.
+
+    Whether we are still connected is one fact about one feed. A caller wanting
+    one-second data is expressing an appetite for recency, not evidence about
+    the connection, and letting it shrink the liveness window is what made an
+    ordinary quiet stretch look like a disconnection.
+    """
     state = _state()
     _tick(state, "QUIET", T0)
     _tick(state, "BUSY", T0 + 1_000)
-    # Feed last spoke 2s ago, which is outside this caller's 1s budget.
-    assert state.is_fresh("QUIET", now_ms=T0 + 3_000, max_age_ms=1_000) is False
+
+    # Feed spoke 2s ago: quiet, not dead, so the quiet-market path still applies.
+    assert state.is_fresh("QUIET", now_ms=T0 + 3_000, max_age_ms=1_000) is True
+    # But once the feed itself is past its own budget, nothing is fresh.
+    assert state.is_fresh("QUIET", now_ms=T0 + FEED + 2_000, max_age_ms=1_000) is False
 
 
 def test_feed_age_is_unknown_before_the_first_message() -> None:

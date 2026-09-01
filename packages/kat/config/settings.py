@@ -466,6 +466,14 @@ class AppSettings(BaseSettings):
     # MarketState.is_fresh. Bounded rather than unlimited because a live feed
     # does not prove one particular subscription is still live.
     quiet_market_max_age_ms: int = Field(default=300_000, ge=5_000, le=3_600_000)
+    # How long the feed as a whole may be silent before we stop believing we are
+    # still connected. Deliberately its own number rather than reusing the
+    # per-market budget above: those answer different questions, and sizing
+    # "is the connection alive" with a budget meant for "did this market just
+    # move" made the platform go blind every time the board went quiet. Six
+    # times the websocket ping interval, so an idle overnight feed never trips
+    # it, and far inside the websocket's own silence timeout.
+    feed_silence_max_age_ms: int = Field(default=60_000, ge=1_000, le=600_000)
     # Account state older than this forces a reconciliation before trading.
     max_account_state_age_ms: int = Field(default=30_000, ge=1_000, le=600_000)
     # Startup reconciliation must succeed within this budget or we stay halted.

@@ -252,9 +252,25 @@ class TestStaleAndBrokenMarketData:
         assert state.age_ms("MKT", now_ms=NOW) is None
 
     def test_data_older_than_the_budget_is_not_fresh(self):
-        state = MarketState(MarketType.EVENT, max_age_ms=5_000)
+        """Past the quiet bound, a book is refused however healthy the feed.
+
+        Ten seconds used to be enough here only because a single market makes
+        the feed clock and the market clock the same number. On a delta feed a
+        ten-second-old book is a book that has not changed, which is why the
+        refusal is pinned at the quiet bound instead.
+        """
+        state = MarketState(
+            MarketType.EVENT, max_age_ms=5_000, quiet_max_age_ms=300_000
+        )
         book = OrderBook.from_two_sided_levels("MKT", [(4000, 1000)], [(4100, 1000)])
-        state.apply_snapshot("MKT", book, now_ms=NOW - 10_000)
+        state.apply_snapshot("MKT", book, now_ms=NOW - 400_000)
+        # Something else arrived just now, so the feed is demonstrably alive and
+        # only this market's own age can condemn it.
+        state.apply_snapshot(
+            "OTHER",
+            OrderBook.from_two_sided_levels("OTHER", [(4000, 1000)], [(4100, 1000)]),
+            now_ms=NOW,
+        )
         assert state.is_fresh("MKT", now_ms=NOW) is False
 
     def test_a_delta_that_crosses_the_book_discards_it(self):
