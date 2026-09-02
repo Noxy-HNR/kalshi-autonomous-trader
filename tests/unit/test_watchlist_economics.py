@@ -257,3 +257,82 @@ class TestSomeSlotsGoToMarketsThatWillResolve:
         picked = _with_learning_slots(far, far + soon, limit=5)
 
         assert [m.ticker for m in picked] == [f"FAR{i}" for i in range(5)]
+
+
+class TestSomeSlotsGoToMarketsThatTrade:
+    """A taker needs the price to move. A maker needs somebody to trade.
+
+    The move-versus-cost filter is the right question for one and silently
+    excludes the best markets for the other. It excluded them badly: the board
+    carries 879 markets trading over a thousand contracts a day and 159 over ten
+    thousand, while the markets the platform watched averaged fourteen trades a
+    day -- and a passive quote managed one round trip in eight days for want of
+    anybody to trade with.
+    """
+
+    @staticmethod
+    def _market(ticker, *, volume, bid=9_400, ask=9_500, last=9_450, prev=9_440):
+        from dataclasses import dataclass
+        from datetime import UTC, datetime, timedelta
+
+        @dataclass
+        class _M:
+            ticker: str
+            volume_24h_qc: int
+            yes_bid_cc: int
+            yes_ask_cc: int
+            last_price_cc: int
+            previous_price_cc: int
+            close_time: object
+
+        return _M(
+            ticker=ticker, volume_24h_qc=volume, yes_bid_cc=bid, yes_ask_cc=ask,
+            last_price_cc=last, previous_price_cc=prev,
+            close_time=datetime.now(UTC) + timedelta(days=200),
+        )
+
+    def test_a_maker_edge_is_the_spread_less_both_fees(self):
+        from kat.engine.ingestion import _maker_edge_cc
+
+        # At 94-95 cents the fee is small, so a one-cent spread pays.
+        assert (_maker_edge_cc(self._market("X", volume=1)) or 0) > 0
+
+    def test_a_spread_that_cannot_cover_two_fees_is_not_a_maker_market(self):
+        from kat.engine.ingestion import _maker_edge_cc
+
+        # Mid-board the fee is 175cc a side, so a one-cent spread loses.
+        tight = self._market("Y", volume=1, bid=4_950, ask=5_050)
+        assert (_maker_edge_cc(tight) or 0) < 0
+
+    def test_liquid_markets_take_the_reserved_slots(self):
+        from kat.engine.ingestion import _MAKER_SLOTS, _with_maker_slots
+
+        quiet = [self._market(f"QUIET{i}", volume=6_000) for i in range(60)]
+        busy = [self._market(f"BUSY{i}", volume=5_000_000) for i in range(20)]
+
+        picked = _with_maker_slots(quiet, quiet + busy, limit=60)
+
+        chosen = {m.ticker for m in picked}
+        assert len(picked) == 60
+        assert sum(1 for t in chosen if t.startswith("BUSY")) == _MAKER_SLOTS
+
+    def test_a_liquid_market_with_no_spread_edge_is_not_reserved(self):
+        """Flow is necessary and not sufficient: the spread still has to pay."""
+        from kat.engine.ingestion import _with_maker_slots
+
+        quiet = [self._market(f"QUIET{i}", volume=6_000) for i in range(60)]
+        # Enormous volume, but a spread that cannot cover two mid-board fees.
+        churn = [self._market("CHURN", volume=9_000_000, bid=4_950, ask=5_050)]
+
+        picked = _with_maker_slots(quiet, quiet + churn, limit=60)
+
+        assert "CHURN" not in {m.ticker for m in picked}
+
+    def test_a_board_with_nothing_liquid_leaves_the_ranking_alone(self):
+        from kat.engine.ingestion import _with_maker_slots
+
+        quiet = [self._market(f"QUIET{i}", volume=6_000) for i in range(60)]
+        picked = _with_maker_slots(quiet, quiet, limit=60)
+
+        assert len(picked) == 60
+        assert all(m.ticker.startswith("QUIET") for m in picked)

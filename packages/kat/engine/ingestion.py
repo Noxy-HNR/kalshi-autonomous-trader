@@ -505,6 +505,28 @@ _LAST_DEFINITIONS: dict[str, dict[str, Any]] = {}
 #: settle within a year, against 9 within a week.
 _WATCH_MAX_DAYS_TO_CLOSE = 365
 
+#: How many watchlist slots go to markets chosen for *trading often* rather than
+#: for moving far.
+#:
+#: A taker needs the price to move further than the round trip costs. A maker
+#: needs only that somebody trades, because the edge is the spread and it is
+#: earned on every fill regardless of where the price goes next. So the
+#: move-versus-cost filter, which is the right question for one, silently
+#: excludes the best markets for the other.
+#:
+#: It excluded them badly. The board carries 879 markets trading over a thousand
+#: contracts a day and 159 over ten thousand; the ones the platform watched
+#: averaged fourteen trades a day, and a passive quote managed one round trip in
+#: eight days for want of anybody to trade with. On the most active markets a
+#: single round trip earns 28 to 78 centicents after both fees, before any
+#: forecast at all.
+_MAKER_SLOTS = 15
+
+#: How much a market must trade in a day to be worth a maker slot. Ten thousand
+#: contracts is roughly the top 160 markets on the board -- enough flow that a
+#: resting quote is reached, rather than merely posted.
+_MAKER_MIN_VOLUME_QC = 1_000_000
+
 #: How many watchlist slots go to markets chosen for resolving soon rather than
 #: for trading well. A settlement label is the only target MispricingStrategy can
 #: read, and a market that does not resolve while we watch it can never carry
@@ -613,6 +635,62 @@ def _move_vs_cost(market: Any) -> float | None:
         # live contract cannot trade at $0.0000 anyway.
         return None
     return abs(last - previous) / cost
+
+
+def _maker_edge_cc(market: Any) -> int | None:
+    """What one passive round trip earns here: the spread, less both fees.
+
+    A maker is paid the spread and pays a fee on each leg. Positive means the
+    market pays for the privilege of quoting it before any view is taken.
+    """
+    spread = _spread_cc(market)
+    bid, ask = market.yes_bid_cc, market.yes_ask_cc
+    if spread is None or bid is None or ask is None:
+        return None
+    mid = (bid + ask) // 2
+    if mid <= 0 or mid >= CC_PER_DOLLAR:
+        return None
+    fee_micros = realised_fee_micros(price_cc=mid, qty_qc=QC_PER_CONTRACT)
+    # micros to centicents: 1e-6 USD against 1e-4 USD.
+    return spread - 2 * (fee_micros // 100)
+
+
+def _with_maker_slots(
+    picked: list[Any], candidates: list[Any], *, limit: int
+) -> list[Any]:
+    """Reserve slots for markets that trade often enough to quote into.
+
+    Chosen on flow and on whether the spread covers both fees -- not on
+    move-versus-cost, which is a taker's question. A market that never moves but
+    trades all day is worthless to a directional strategy and is exactly what a
+    maker wants.
+    """
+    if limit <= _MAKER_SLOTS:
+        return picked[:limit]
+
+    active = [
+        m
+        for m in candidates
+        if (m.volume_24h_qc or 0) >= _MAKER_MIN_VOLUME_QC
+        and (_maker_edge_cc(m) or 0) > 0
+    ]
+    active.sort(key=lambda m: float(m.volume_24h_qc or 0), reverse=True)
+
+    kept = picked[: limit - _MAKER_SLOTS]
+    seen = {m.ticker for m in kept}
+    makers = [m for m in active if m.ticker not in seen][:_MAKER_SLOTS]
+    if makers:
+        log.info(
+            "ingestion.maker_slots",
+            domain="event",
+            reserved=len(makers),
+            min_volume_qc=_MAKER_MIN_VOLUME_QC,
+            best_edge_cc=max((_maker_edge_cc(m) or 0) for m in makers),
+            note="markets that trade often enough for a resting quote to be reached",
+        )
+    seen.update(m.ticker for m in makers)
+    remainder = [m for m in picked if m.ticker not in seen]
+    return (kept + makers + remainder)[:limit]
 
 
 def _with_learning_slots(
@@ -774,7 +852,9 @@ async def select_event_watchlist(
             min_move_vs_cost=_MIN_MOVE_VS_COST,
             note="watching the best of a bad board; expect very few intents",
         )
-    picked = _with_learning_slots(quotable, tradeable, limit=limit)
+    picked = _with_maker_slots(
+        _with_learning_slots(quotable, tradeable, limit=limit), tradeable, limit=limit
+    )
     chosen = [m.ticker for m in picked]
     # Kept rather than discarded: these objects already carry the title, rules
     # and close time that the news matcher and the term features need, and
