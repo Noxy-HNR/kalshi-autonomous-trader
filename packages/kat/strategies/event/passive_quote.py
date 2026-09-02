@@ -60,6 +60,7 @@ _SKIP_SPREAD_TOO_TIGHT = "spread_does_not_cover_two_fees"
 _SKIP_PRICE_BAND = "price_outside_band"
 _SKIP_INVENTORY_FULL = "inventory_at_limit"
 _SKIP_NO_QUOTE = "no_quotable_side"
+_SKIP_ALREADY_QUOTING = "already_resting_in_this_market"
 
 
 class PassiveQuoteStrategy(TradingStrategy):
@@ -133,6 +134,15 @@ class PassiveQuoteStrategy(TradingStrategy):
         required_cc = 2 * fee_cc * self.int_param("fee_cover_bps") // 10_000
         if quote.spread_cc < required_cc:
             return self.skip(_SKIP_SPREAD_TOO_TIGHT)
+
+        # One quote at a time. Without this the strategy re-quotes every
+        # cycle and stacks hundreds of resting orders into a single market: the
+        # fills then accumulate one large position instead of cycling in and out
+        # of small ones, and a week produced five distinct round trips where it
+        # should produce hundreds. A market maker that cannot see its own working
+        # orders is not quoting, it is accumulating.
+        if ctx.resting_qty_qc > 0:
+            return self.skip(_SKIP_ALREADY_QUOTING)
 
         position_qc = ctx.position_qc
         limit_qc = self.int_param("max_inventory_qc")

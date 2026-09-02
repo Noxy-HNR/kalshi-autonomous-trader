@@ -184,6 +184,10 @@ class StrategyContext:
     #: How long the current position has been held, or None when flat or
     #: unknown. A forecast with a horizon is only actionable for that horizon.
     position_age_ms: int | None = None
+    #: Quantity this strategy already has resting in this market. A quoting
+    #: strategy that cannot see its own working orders re-quotes every cycle and
+    #: stacks hundreds of them into one position instead of cycling.
+    resting_qty_qc: int = 0
     # Detected regime, when regime detection is running.
     regime: str | None = None
     # Relevant news/research signals, already time-filtered.

@@ -709,6 +709,7 @@ class TradingLoop:
             model_version=probability[2] if probability else None,
             position_qc=self._position_qc(snapshot.ticker),
             position_age_ms=self._position_age_ms(snapshot.ticker, now_ms),
+            resting_qty_qc=self._resting_qty_qc(snapshot.ticker),
             regime=self.regimes.get(snapshot.ticker),
             research=self.research.get(snapshot.ticker, {}),
             fee_multiplier=(
@@ -740,6 +741,14 @@ class TradingLoop:
         """
         age = self.market_state.feed_age_ms(now_ms=now_ms)
         return age is not None and age <= self.market_state.feed_max_age_ms
+
+    def _resting_qty_qc(self, ticker: str) -> int:
+        """Quantity still working in this market, across our own orders."""
+        try:
+            working = self.execution.working_orders(ticker=ticker)
+        except Exception:
+            return 0
+        return sum(getattr(o, "exposure_qty_qc", 0) for o in working)
 
     def _position_age_ms(self, ticker: str, now_ms: int) -> int | None:
         """How long the position in ``ticker`` has been open, or None."""

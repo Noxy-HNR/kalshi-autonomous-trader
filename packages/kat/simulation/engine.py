@@ -1507,6 +1507,9 @@ class BacktestEngine:
             model_version=model_version,
             position_qc=position_qc,
             position_age_ms=position_age_ms,
+            resting_qty_qc=sum(
+                o.remaining_qc for o in self.fills.working_orders(snap.ticker)
+            ),
             fee_multiplier=self.config.fee_multiplier,
             # Supplied here for the same reason it is supplied live: on a delta
             # feed, silence on one market means the book has not changed, and
