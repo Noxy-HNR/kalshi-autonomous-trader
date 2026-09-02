@@ -220,7 +220,20 @@ def _summarise(result: Any, engine: BacktestEngine) -> None:
 
     trades = getattr(result, "trades", None) or []
     print()
-    print(f"  --- {len(trades)} simulated trades ---------------------------------")
+    # Distinct as well as total. A ledger that books the same close more than
+    # once inflates the trade count, tightens every confidence interval around
+    # a repeated number, and makes a handful of losses look like a hundred and
+    # forty-four -- which is exactly what a win rate of precisely zero with an
+    # expectancy interval of six hundredths of a cent turned out to be.
+    distinct = {
+        (t.ticker, t.entry_ms, t.exit_ms, t.qty_qc, t.net_pnl_micros) for t in trades
+    }
+    duplicates = len(trades) - len(distinct)
+    suffix = f" ({len(distinct)} distinct, {duplicates} duplicated)" if duplicates else ""
+    print(
+        f"  --- {len(trades)} simulated trades{suffix} "
+        "---------------------------------"
+    )
     for trade in trades[:12]:
         print(f"    {trade}")
     if len(trades) > 12:
