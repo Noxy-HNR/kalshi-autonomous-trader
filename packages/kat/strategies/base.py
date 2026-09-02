@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from kat.common.enums import MarketType, StrategyState
+from kat.kalshi.fees import PerpFeeSchedule
 from kat.marketdata.state import MarketSnapshot
 from kat.risk.types import OrderIntent
 
@@ -188,6 +189,13 @@ class StrategyContext:
     #: strategy that cannot see its own working orders re-quotes every cycle and
     #: stacks hundreds of them into one position instead of cycling.
     resting_qty_qc: int = 0
+    #: The perpetual's own maker and taker rates, when this is a perpetual.
+    #: Perpetuals are charged a flat fraction of notional and event contracts a
+    #: quadratic fee that at fifty cents is a hundred times larger, so a perp
+    #: strategy reading the event schedule prices itself out of every market it
+    #: exists for. None means the rates are unknown, which callers must treat as
+    #: the conservative taker rate on both legs rather than as a discount.
+    perp_fee_schedule: PerpFeeSchedule | None = None
     # Detected regime, when regime detection is running.
     regime: str | None = None
     # Relevant news/research signals, already time-filtered.

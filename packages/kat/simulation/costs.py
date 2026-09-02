@@ -48,7 +48,12 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from kat.common.fixedpoint import micros_to_decimal
-from kat.kalshi.fees import FeeSchedule, estimate_fee_micros
+from kat.kalshi.fees import (
+    FeeSchedule,
+    PerpFeeSchedule,
+    estimate_fee_micros,
+    perp_fee_micros,
+)
 from kat.marketdata.book import OrderBook
 
 __all__ = [
@@ -108,6 +113,13 @@ class CostModel:
     """
 
     fee_schedule: FeeSchedule = field(default_factory=FeeSchedule)
+    #: Rates for a perpetual, when this run is trading one. Perpetuals pay a
+    #: flat fraction of notional -- 2bp to a maker, 4bp to a taker -- and not
+    #: the quadratic event-contract fee, which at fifty cents is 350bp and
+    #: would overstate the cost by about a hundredfold. Left None the
+    #: quadratic schedule applies, which is right for event contracts and
+    #: wrong for anything else.
+    perp_fees: PerpFeeSchedule | None = None
     latency: LatencyModel = field(default_factory=LatencyModel)
 
     #: Fraction of the size already resting at our price that we assume is
@@ -148,6 +160,13 @@ class CostModel:
         a series uses the flat schedule.
         """
         effective_taker = True if self.charge_maker_as_taker else is_taker
+        if self.perp_fees is not None:
+            return perp_fee_micros(
+                price_cc=price_cc,
+                qty_qc=qty_qc,
+                schedule=self.perp_fees,
+                is_taker=effective_taker,
+            )
         return estimate_fee_micros(
             price_cc=price_cc,
             qty_qc=qty_qc,
@@ -194,6 +213,15 @@ class CostModel:
             "fee_estimate_exact": self.fee_schedule.exact,
             "latency": self.latency.to_dict(),
             "queue_ahead_bps": self.queue_ahead_bps,
+            "perp_fees": (
+                {
+                    "maker_rate": str(self.perp_fees.maker_rate),
+                    "taker_rate": str(self.perp_fees.taker_rate),
+                    "exact": self.perp_fees.exact,
+                }
+                if self.perp_fees is not None
+                else None
+            ),
             "taker_concession_cc": self.taker_concession_cc,
             "max_walk_levels": self.max_walk_levels,
             "order_ttl_ms": self.order_ttl_ms,

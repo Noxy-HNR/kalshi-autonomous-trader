@@ -1510,6 +1510,10 @@ class BacktestEngine:
             resting_qty_qc=sum(
                 o.remaining_qc for o in self.fills.working_orders(snap.ticker)
             ),
+            # A perpetual strategy that reads the event-contract fee prices
+            # itself out of every market it exists for, so the run's own perp
+            # rates travel with the context rather than being re-derived.
+            perp_fee_schedule=self.config.costs.perp_fees,
             fee_multiplier=self.config.fee_multiplier,
             # Supplied here for the same reason it is supplied live: on a delta
             # feed, silence on one market means the book has not changed, and

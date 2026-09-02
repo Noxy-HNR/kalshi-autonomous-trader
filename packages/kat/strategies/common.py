@@ -45,7 +45,13 @@ from typing import Any, ClassVar
 from kat.common.enums import BookSide, MarketType, OutcomeSide, StrategyState
 from kat.common.errors import ConfigError
 from kat.common.fixedpoint import CC_PER_DOLLAR, QC_PER_CONTRACT, Rounding, parse_dollars_micros
-from kat.kalshi.fees import FeeSchedule, estimate_fee_micros, round_trip_fee_micros
+from kat.kalshi.fees import (
+    FeeSchedule,
+    PerpFeeSchedule,
+    estimate_fee_micros,
+    perp_fee_micros,
+    round_trip_fee_micros,
+)
 from kat.marketdata.book import OrderBook
 from kat.risk.types import OrderIntent
 from kat.strategies.base import Strategy, StrategyContext, StrategyMetadata, StrategyParam
@@ -81,6 +87,7 @@ __all__ = [
     "per_bar_volatility_cc",
     "perp_costing",
     "perp_execution_cost",
+    "perp_maker_costing",
     "probability_to_cc",
     "resolve_params",
     "time_to_expiry_ms",
@@ -470,6 +477,51 @@ def perp_costing(
         exit_price_cc=clamp_price_cc(fair_cc),
         qty_qc=qty_qc,
         schedule=schedule,
+    )
+    return Costing(
+        qty_qc=qty_qc,
+        cost_cc=entry_cc,
+        value_cc=fair_cc,
+        edge_cc=edge_cc,
+        gross_micros=gross_micros,
+        fees_micros=fees_micros,
+        funding_micros=funding_micros,
+        net_micros=gross_micros + funding_micros - fees_micros,
+    )
+
+
+def perp_maker_costing(
+    *,
+    is_long: bool,
+    entry_cc: int,
+    fair_cc: int,
+    qty_qc: int,
+    schedule: PerpFeeSchedule,
+    funding_micros: int = 0,
+) -> Costing:
+    """Expected value of a *passive* perpetual quote.
+
+    Two things separate this from :func:`perp_costing`. It charges the
+    perpetual rate on notional rather than the event contract's quadratic fee,
+    which at fifty cents is 350 basis points against a perpetual maker's two and
+    would reject every quote on arithmetic that belongs to another instrument.
+    And it charges the maker rate on entry, because a resting order that fills
+    is a maker fill -- assuming taker on both legs is not conservatism here, it
+    is the wrong schedule twice.
+
+    The exit leg is still charged at the taker rate. A quote that gets out
+    passively earns more than this says; one that has to cross pays exactly
+    this. Costing the exit optimistically is how a market maker discovers, after
+    the fact, that it was only ever paid on the trades it wishes it had not
+    done.
+    """
+    edge_cc = (fair_cc - entry_cc) if is_long else (entry_cc - fair_cc)
+    gross_micros = edge_cc * qty_qc
+    fees_micros = perp_fee_micros(
+        price_cc=entry_cc, qty_qc=qty_qc, schedule=schedule, is_taker=False
+    ) + perp_fee_micros(
+        price_cc=clamp_price_cc(fair_cc), qty_qc=qty_qc,
+        schedule=schedule, is_taker=True,
     )
     return Costing(
         qty_qc=qty_qc,

@@ -212,6 +212,7 @@ def build_default_strategies(
     from kat.strategies.event.passive_quote import PassiveQuoteStrategy
     from kat.strategies.perp.basis import PerpBasisStrategy
     from kat.strategies.perp.funding_carry import FundingCarryStrategy
+    from kat.strategies.perp.passive_quote import PerpPassiveQuoteStrategy
     from kat.strategies.perp.trend import PerpTrendStrategy
 
     classes: list[Callable[[], Strategy]] = [
@@ -225,6 +226,7 @@ def build_default_strategies(
         FundingCarryStrategy,
         PerpTrendStrategy,
         PerpBasisStrategy,
+        PerpPassiveQuoteStrategy,
     ]
 
     built: list[Strategy] = []

@@ -54,7 +54,9 @@ __all__ = [
     "FALLBACK_MULTIPLIER",
     "FeeEstimate",
     "FeeSchedule",
+    "PerpFeeSchedule",
     "estimate_fee_micros",
+    "perp_fee_micros",
     "prorate_fee_micros",
     "realised_fee_micros",
     "round_trip_fee_micros",
@@ -330,3 +332,81 @@ def realised_fee_micros(
         is_taker=is_taker,
         apply_safety_margin=False,
     ).fee_micros
+
+
+# ---------------------------------------------------------------------------
+# Perpetuals
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PerpFeeSchedule:
+    """Maker and taker rates for one perpetual, as fractions of notional.
+
+    Perpetuals are priced nothing like event contracts and must not borrow their
+    fee model. An event contract pays ``m * C * P * (1 - P)``, which peaks at
+    175 centicents a side on a fifty-cent contract -- 350 basis points of the
+    notional traded. A perpetual pays a flat rate on notional: at the time of
+    writing every Kalshi perpetual charges 2bp to a maker and 4bp to a taker,
+    which is roughly two orders of magnitude cheaper.
+
+    Running perps through :class:`FeeSchedule` charges the quadratic fee on a
+    linear instrument and overstates the cost about a hundredfold, which does
+    not merely distort a backtest -- it rejects every strategy that would have
+    worked. The gap mattered: the perpetuals domain has a REST client, three
+    strategies, a risk engine and an execution engine, and no perp result had
+    ever been costed with a perp fee.
+
+    ``exact`` is False when the rates did not come from the exchange, and the
+    same refusal-to-guess posture applies as for event contracts.
+    """
+
+    maker_rate: Decimal = Decimal("0.0004")
+    taker_rate: Decimal = Decimal("0.0004")
+    exact: bool = False
+
+    @classmethod
+    def from_fee_tiers(
+        cls, payload: Any, ticker: str
+    ) -> PerpFeeSchedule:
+        """Build from ``GetMarginFeeTiers``, which quotes rates per market.
+
+        A market missing from the response keeps the conservative default --
+        the taker rate on both sides -- rather than inheriting another market's
+        discount.
+        """
+        makers = (payload or {}).get("maker_fee_rates") or {}
+        takers = (payload or {}).get("taker_fee_rates") or {}
+        maker, taker = makers.get(ticker), takers.get(ticker)
+        if maker is None or taker is None:
+            return cls()
+        try:
+            return cls(
+                maker_rate=Decimal(str(maker)),
+                taker_rate=Decimal(str(taker)),
+                exact=True,
+            )
+        except (ArithmeticError, TypeError, ValueError):
+            return cls()
+
+
+def perp_fee_micros(
+    *,
+    price_cc: int,
+    qty_qc: int,
+    schedule: PerpFeeSchedule | None = None,
+    is_taker: bool = True,
+) -> int:
+    """Fee for one perpetual fill, in micros.
+
+    ``qty_qc * price_cc`` is already micros of notional -- centi-contracts times
+    ten-thousandths of a dollar -- so the rate applies to that product directly
+    with no rescaling. Rounded up, because the exchange does not round a fee
+    down in our favour.
+    """
+    if price_cc <= 0 or qty_qc <= 0:
+        return 0
+    schedule = schedule or PerpFeeSchedule()
+    rate = schedule.taker_rate if is_taker else schedule.maker_rate
+    notional_micros = Decimal(qty_qc) * Decimal(price_cc)
+    return int((notional_micros * rate).to_integral_value(rounding=ROUND_CEILING))
