@@ -58,8 +58,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import pickle
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 from kat.common.enums import MarketType
@@ -135,10 +137,10 @@ async def _client() -> KalshiHTTPClient:
 
 async def build_feed(
     rest: PerpsREST, markets: list[Any], *, hours: int, depth: dict[str, int],
-    funding: dict[str, float],
-) -> EventFeed:
+    funding: dict[str, float], skip_recent_hours: int = 0,
+) -> list[Any]:
     """One book update, one print and one funding tick per candle."""
-    end_ts = int(time.time())
+    end_ts = int(time.time()) - skip_recent_hours * 3600
     start_ts = end_ts - hours * 3600
     events: list[Any] = []
     seq = 0
@@ -220,7 +222,10 @@ async def build_feed(
     events.sort(key=lambda e: (e.info_ts_ms, e.seq))
     print(f"  feed     {len(events):,} events, {with_volume:,} candles with volume, "
           f"{len(markets)} markets")
-    return EventFeed(events, name="perp-candles")
+    # The list, not a feed. EventFeed deliberately exposes no way to read its
+    # events back -- that absence is what stops a strategy seeing the future --
+    # so caching has to happen before one is built, not by asking it to unpack.
+    return events
 
 
 async def main() -> int:
@@ -229,9 +234,30 @@ async def main() -> int:
     parser.add_argument("--capital", type=float, default=200.0)
     parser.add_argument("--strategy", nargs="*", default=["passive_quote"])
     parser.add_argument("--tickers", nargs="*", default=None)
+    parser.add_argument("--skip-recent-hours", type=int, default=0,
+                        help="end the window this many hours before now. With "
+                             "--hours this carves a train period, leaving the "
+                             "skipped tail as an untouched test period.")
+    parser.add_argument("--param", nargs="*", default=[],
+                        help="strategy parameter overrides as name=value")
+    parser.add_argument("--cache", default=None,
+                        help="path to save/reuse the fetched feed. Depth and "
+                             "candles are re-fetched on every run otherwise, "
+                             "and two identical runs returned -7.49%% and "
+                             "-17.88%% -- so a parameter sweep across "
+                             "uncached runs measures the snapshot, not the "
+                             "parameter.")
     args = parser.parse_args()
 
     configure_logging("WARNING")
+
+    cache = Path(args.cache) if args.cache else None
+    if cache is not None and cache.exists():
+        with cache.open("rb") as fh:
+            events, perp_fees, summary = pickle.load(fh)
+        print(f"  cached   {summary}")
+        return _run(args, events, perp_fees)
+
     http = await _client()
     rest = PerpsREST(http)
     try:
@@ -287,29 +313,57 @@ async def main() -> int:
             print(f"  depth    real for {len(depth)}/{len(markets)}, "
                   f"median {sizes[len(sizes) // 2] / 100:,.0f} contracts at the touch")
 
-        feed = await build_feed(
-            rest, markets, hours=args.hours, depth=depth, funding=funding
+        # One schedule for the run. Every Kalshi perpetual currently quotes the
+        # same 2bp/4bp pair, so this is exact rather than a compromise -- and it
+        # is asserted rather than assumed.
+        rates = {(s.maker_rate, s.taker_rate) for s in schedules.values() if s.exact}
+        if len(rates) == 1:
+            maker, taker = next(iter(rates))
+            perp_fees = PerpFeeSchedule(
+                maker_rate=maker, taker_rate=taker, exact=True
+            )
+        else:
+            print("  NOTE: perpetuals quote differing rates; falling back to "
+                  "the conservative default for the whole run")
+            perp_fees = PerpFeeSchedule()
+
+        events = await build_feed(
+            rest, markets, hours=args.hours, depth=depth, funding=funding,
+            skip_recent_hours=args.skip_recent_hours,
         )
     finally:
         await http.aclose()
 
-    strategies = [STRATEGIES[name]() for name in args.strategy if name in STRATEGIES]
+    if cache is not None:
+        with cache.open("wb") as fh:
+            pickle.dump(
+                (events, perp_fees,
+                 f"{len(markets)} markets, {args.hours}h ending "
+                 f"{args.skip_recent_hours}h ago"),
+                fh,
+            )
+        print(f"  cached   feed written to {cache}")
+    return _run(args, events, perp_fees)
+
+
+def _run(args: Any, events: list[Any], perp_fees: PerpFeeSchedule) -> int:
+    feed = EventFeed(events, name="perp-candles")
+    overrides: dict[str, Any] = {}
+    for item in args.param:
+        name, _, raw = item.partition("=")
+        try:
+            overrides[name] = int(raw)
+        except ValueError:
+            overrides[name] = float(raw)
+    if overrides:
+        print(f"  params   {overrides}")
+    strategies = [
+        STRATEGIES[name](overrides or None)
+        for name in args.strategy if name in STRATEGIES
+    ]
     if not strategies:
         print(f"unknown strategy; known: {sorted(STRATEGIES)}", file=sys.stderr)
         return 1
-
-    # One schedule for the run. Every Kalshi perpetual currently quotes the same
-    # 2bp/4bp pair, so this is exact rather than a compromise -- and it is
-    # asserted rather than assumed.
-    rates = {(s.maker_rate, s.taker_rate) for s in schedules.values() if s.exact}
-    perp_fees = (
-        PerpFeeSchedule(maker_rate=r[0], taker_rate=r[1], exact=True)
-        if len(rates) == 1 and (r := next(iter(rates)))
-        else PerpFeeSchedule()
-    )
-    if len(rates) > 1:
-        print("  NOTE: perpetuals quote differing rates; falling back to the "
-              "conservative default for the whole run")
 
     engine = BacktestEngine(
         feed=feed,
