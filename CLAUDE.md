@@ -170,4 +170,5 @@ both at once without the user explicitly asking for live trading.
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | 24/7 running, monitoring, backup/restore, server migration |
 | [docs/SECURITY.md](docs/SECURITY.md) | Credentials, redaction, dashboard exposure |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Local dev setup, adding a strategy/data source |
+| [docs/RESEARCH.md](docs/RESEARCH.md) | Every structure measured on Kalshi and why it failed — read before proposing a strategy, so none is searched twice |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Change checklist, commit message expectations |
