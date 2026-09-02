@@ -836,14 +836,20 @@ async def select_event_watchlist(
     # has to clear its costs *and* be alive; economics decides eligibility,
     # activity decides priority.
     quotable.sort(key=lambda m: float(m.volume_24h_qc or 0), reverse=True)
-    tradeable = [
+    # A separate name, deliberately. This used to reassign `tradeable`, which
+    # above is every quoted market -- so the reserved slots further down were
+    # handed the economically filtered list and drew from the very filter they
+    # exist to bypass. Both the maker slots and the learning slots silently
+    # picked nothing, and the watchlist looked unchanged for a reason that was
+    # nowhere in the selection logic.
+    affordable = [
         m
         for m in quotable
         if (_move_vs_cost(m) or 0.0) >= _MIN_MOVE_VS_COST
         and (m.volume_24h_qc or 0) >= _MIN_WATCH_VOLUME_QC
     ]
-    if tradeable:
-        quotable = tradeable
+    if affordable:
+        quotable = affordable
     else:
         log.warning(
             "ingestion.no_market_covers_its_costs",
