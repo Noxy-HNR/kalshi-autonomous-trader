@@ -129,3 +129,58 @@ class TestTheSimulatorChargesTheRightOne:
             "maker_rate": "0.0002", "taker_rate": "0.0004", "exact": True
         }
         assert CostModel().to_dict()["perp_fees"] is None
+
+
+class TestAPerpetualIsNeverPricedThroughTheEventFormula:
+    """The bug this guards was not an overcharge, it was a sign flip.
+
+    ``perp_costing`` took an event ``FeeSchedule`` and every perpetual strategy
+    on the platform -- trend, funding carry, basis -- computed expected value
+    through it. The quadratic is ``m * C * P * (1 - P)``, which assumes a price
+    between zero and a dollar. A perpetual trades far above one: at $7.18 the
+    term ``P * (1 - P)`` is -44.4, so the "fee" came back *negative* and every
+    perp proposal was handed a rebate of about ninety dollars per twenty
+    contracts, with its expected value inflated to match.
+
+    A strategy cannot be measured, rejected or trusted while its costs carry the
+    wrong sign, so this is a regression test on the sign before it is one on the
+    magnitude.
+    """
+
+    def test_the_event_formula_really_does_go_negative_up_here(self):
+        """The premise, asserted rather than asserted-about."""
+        assert estimate_fee_micros(price_cc=71_800, qty_qc=2_000).fee_micros < 0
+
+    def test_a_perpetual_position_is_charged_a_positive_fee(self):
+        from kat.strategies.common import perp_costing
+
+        costing = perp_costing(
+            is_long=True, entry_cc=71_549, fair_cc=71_800, qty_qc=2_000,
+            schedule=PerpFeeSchedule.from_fee_tiers(TIERS, "KXZECPERP"),
+        )
+        assert costing.fees_micros > 0
+
+    def test_the_fee_is_both_legs_at_the_taker_rate(self):
+        """A proposal that crosses to get in will cross to get out."""
+        from kat.strategies.common import perp_costing
+
+        schedule = PerpFeeSchedule.from_fee_tiers(TIERS, "KXZECPERP")
+        costing = perp_costing(
+            is_long=True, entry_cc=71_549, fair_cc=71_800, qty_qc=2_000,
+            schedule=schedule,
+        )
+        assert costing.fees_micros == (
+            perp_fee_micros(price_cc=71_549, qty_qc=2_000, schedule=schedule)
+            + perp_fee_micros(price_cc=71_800, qty_qc=2_000, schedule=schedule)
+        )
+
+    def test_the_rebate_would_have_inflated_expected_value(self):
+        """Why it mattered: a negative fee is added to the edge, not taken from
+        it, so the worse the arithmetic the better the trade looked."""
+        from kat.strategies.common import perp_costing
+
+        costing = perp_costing(
+            is_long=True, entry_cc=71_549, fair_cc=71_800, qty_qc=2_000,
+            schedule=PerpFeeSchedule.from_fee_tiers(TIERS, "KXZECPERP"),
+        )
+        assert costing.net_micros < costing.gross_micros

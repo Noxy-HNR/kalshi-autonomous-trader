@@ -39,6 +39,7 @@ from dataclasses import dataclass
 
 from kat.common.enums import OutcomeSide
 from kat.common.fixedpoint import QC_PER_CONTRACT, Rounding, parse_dollars_micros
+from kat.kalshi.fees import PerpFeeSchedule
 from kat.marketdata.book import OrderBook
 from kat.strategies.base import StrategyContext, StrategyParam
 from kat.strategies.common import (
@@ -491,7 +492,7 @@ def propose_perp_trade(
         entry_cc=trip.entry.vwap_cc,
         fair_cc=realisable_exit_cc,
         qty_qc=trip.qty_qc,
-        schedule=fee_schedule_for(ctx),
+        schedule=ctx.perp_fee_schedule or PerpFeeSchedule(),
         funding_micros=funding_micros,
     )
     if costing.net_micros < min_net_ev_micros:

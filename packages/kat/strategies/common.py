@@ -460,7 +460,7 @@ def perp_costing(
     entry_cc: int,
     fair_cc: int,
     qty_qc: int,
-    schedule: FeeSchedule,
+    schedule: PerpFeeSchedule,
     funding_micros: int = 0,
 ) -> Costing:
     """Expected value of a perpetual position taken at ``entry_cc``.
@@ -469,14 +469,24 @@ def perp_costing(
     intended holding period -- negative when we are the side that pays. It is
     part of the edge on a perpetual in a way it never is on an event contract,
     so it is an input here rather than a separate check.
+
+    The schedule is a :class:`PerpFeeSchedule` and deliberately cannot be an
+    event contract's. This took an event ``FeeSchedule`` and every perpetual
+    strategy on the platform was costed through it, which does not merely
+    overstate the fee -- the quadratic formula is ``m * C * P * (1 - P)``, and a
+    perpetual trades far above a dollar, so ``P > 1`` makes the whole term
+    *negative*. Every perp trade was being handed a fee rebate of about ninety
+    dollars per twenty contracts, and its expected value inflated to match.
     """
     edge_cc = (fair_cc - entry_cc) if is_long else (entry_cc - fair_cc)
     gross_micros = edge_cc * qty_qc
-    fees_micros = round_trip_fee_micros(
-        entry_price_cc=entry_cc,
-        exit_price_cc=clamp_price_cc(fair_cc),
-        qty_qc=qty_qc,
-        schedule=schedule,
+    # Taker on both legs: a proposal that crosses to get in will cross to get
+    # out, and there is no clamping here because a perpetual has no dollar
+    # ceiling to clamp to.
+    fees_micros = perp_fee_micros(
+        price_cc=entry_cc, qty_qc=qty_qc, schedule=schedule, is_taker=True
+    ) + perp_fee_micros(
+        price_cc=fair_cc, qty_qc=qty_qc, schedule=schedule, is_taker=True
     )
     return Costing(
         qty_qc=qty_qc,
