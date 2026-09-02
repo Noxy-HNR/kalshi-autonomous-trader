@@ -42,6 +42,16 @@ honest limit of it -- the exchange publishes no historical depth.
 
 Leverage is not a parameter here or anywhere. The perpetual risk engine caps
 projected exposure at equity, and this runs through it like anything else.
+
+On repeating a run
+------------------
+Depth is re-snapshotted on every invocation, and the queue it implies changes
+what fills. Two runs of identical parameters returned -7.49% and -17.88%, so a
+single figure from this is a draw from a wide distribution and not a
+measurement. The sign has been stable across every run; the magnitude has not,
+and quoting one to the basis point would be false precision. Fixing that means
+banking depth over time rather than sampling it once, which the engine can only
+do once perpetual credentials are configured.
 """
 
 from __future__ import annotations
@@ -338,6 +348,25 @@ async def main() -> int:
     print(f"  win rate {m.win_rate:.0%}")
     print(f"  fees     ${m.total_fees_micros / 1e6:.4f}")
     print(f"  maker    {m.maker_fill_pct:.0%} of fills")
+    if trades:
+        import collections as _c
+        by_reason = _c.defaultdict(lambda: [0, 0])
+        for t in trades:
+            r = by_reason[getattr(t, "exit_reason", "?") or "?"]
+            r[0] += 1
+            r[1] += t.net_pnl_micros
+        print()
+        print("  exits:")
+        for reason, (n, pnl) in sorted(by_reason.items(), key=lambda kv: kv[1][1]):
+            print(f"    {reason:<22}{n:>6} trades  ${pnl/1e6:+9.4f}")
+        worst = sorted(trades, key=lambda t: t.net_pnl_micros)[:5]
+        print("  worst five:")
+        for t in worst:
+            print(f"    {t.ticker:<14}{t.qty_qc/100:>8.0f}c  ${t.net_pnl_micros/1e6:+9.4f}"
+                  f"  {getattr(t,'exit_reason','?')}")
+        gross = sum(t.net_pnl_micros for t in trades)
+        print(f"  net over all trades: ${gross/1e6:+.4f}")
+
     for strategy in engine.strategies:
         health = strategy.health()
         skips = sorted(health.get("skips", {}).items(), key=lambda kv: -kv[1])[:4]
