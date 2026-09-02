@@ -49,7 +49,6 @@ from kat.strategies.common import (
 )
 from kat.strategies.proposal import (
     EV_PARAM_SPACE,
-    LIQUIDITY_PARAM_SPACE,
     screen_event_market,
     screen_freshness,
 )
@@ -60,6 +59,7 @@ _SKIP_SPREAD_TOO_TIGHT = "spread_does_not_cover_two_fees"
 _SKIP_PRICE_BAND = "price_outside_band"
 _SKIP_INVENTORY_FULL = "inventory_at_limit"
 _SKIP_NO_QUOTE = "no_quotable_side"
+_SKIP_QUEUE_TOO_LONG = "queue_ahead_too_long"
 _SKIP_ALREADY_QUOTING = "already_resting_in_this_market"
 
 
@@ -77,7 +77,33 @@ class PassiveQuoteStrategy(TradingStrategy):
     not drift into an unexamined directional bet.
     """
     PARAM_SPACE = (
-        *LIQUIDITY_PARAM_SPACE,
+        # Deliberately *not* LIQUIDITY_PARAM_SPACE. Three of its guards invert
+        # for a maker, and inheriting them pointed this strategy at the markets
+        # it is worst on while forbidding the ones it exists for:
+        #
+        #   max_spread_cc  a taker pays the spread, so a wide one is a cost. A
+        #                  maker is paid it. The default of 200 rejected every
+        #                  market whose spread was worth quoting.
+        #   min_depth_qc   a taker needs size to fill against. A maker needs the
+        #                  queue *ahead* to be short, because it fills in order.
+        #                  As a minimum it excluded precisely the reachable
+        #                  books; the real constraint is max_queue_qc below.
+        #   price band     [5c, 95c] excluded 73% of the exchange's liquid
+        #                  volume, which sits under 10c. The fee is quadratic,
+        #                  so it collapses at the extremes: 20cc a side at 3c
+        #                  against 175cc at 50c.
+        StrategyParam(
+            "max_spread_cc", 1_500, low=50, high=5_000, step=25,
+            description="widest spread worth quoting; wide is good for a maker",
+        ),
+        StrategyParam(
+            "min_depth_qc", 100, low=100, high=100_000, step=100,
+            description="minimum resting size on BOTH sides across five levels, in centi-contracts",
+        ),
+        StrategyParam(
+            "max_queue_qc", 5_000, low=100, high=1_000_000, step=100,
+            description="longest queue at our own price worth joining, in centi-contracts",
+        ),
         *EV_PARAM_SPACE,
         StrategyParam(
             "fee_cover_bps", 15_000, low=10_000, high=50_000, step=1_000,
@@ -92,11 +118,11 @@ class PassiveQuoteStrategy(TradingStrategy):
             description="largest absolute position before quoting only reduces it",
         ),
         StrategyParam(
-            "min_price_cc", 500, low=100, high=5_000, step=100,
+            "min_price_cc", 100, low=100, high=5_000, step=100,
             description="cheapest midpoint worth quoting",
         ),
         StrategyParam(
-            "max_price_cc", 9_500, low=5_000, high=9_900, step=100,
+            "max_price_cc", 9_900, low=5_000, high=9_900, step=100,
             description="dearest midpoint worth quoting",
         ),
     )
@@ -181,6 +207,21 @@ class PassiveQuoteStrategy(TradingStrategy):
         if not 0 < price_cc < CC_PER_DOLLAR:
             return self.skip(_SKIP_NO_QUOTE)
 
+        # How much is already resting where we are about to rest. This, not the
+        # spread, is what decides whether a passive quote is ever reached: fills
+        # go in time order, so everything ahead has to trade before we do. On
+        # the exchange's busiest markets the touch carries a median of 124,000
+        # contracts, and joining the back of that queue is not market making --
+        # the only fills it produces are the ones nobody else wanted, which is
+        # adverse selection with the spread given away for free.
+        queue_qc = (
+            quote.yes_bid_size_qc
+            if side is OutcomeSide.YES
+            else quote.yes_ask_size_qc
+        )
+        if queue_qc > self.int_param("max_queue_qc"):
+            return self.skip(_SKIP_QUEUE_TOO_LONG)
+
         qty_qc = self.int_param("quote_qc")
         if abs(position_qc) >= limit_qc:
             qty_qc = min(qty_qc, abs(position_qc))
@@ -211,6 +252,7 @@ class PassiveQuoteStrategy(TradingStrategy):
                 "fee_cc": fee_cc,
                 "position_qc": position_qc,
                 "resting_at_cc": price_cc,
+                "queue_ahead_qc": queue_qc,
             },
         )
         # The whole point. Crossing would pay the spread this exists to earn,
