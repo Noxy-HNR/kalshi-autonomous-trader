@@ -1495,6 +1495,13 @@ class BacktestEngine:
         else:
             perp_pos = self.perp_ledger.positions.get(snap.ticker)
             position_qc = perp_pos.qty_qc if perp_pos else 0
+            # The perpetual ledger records opened_ms and nothing read it, so a
+            # perp strategy could not tell a position opened a minute ago from
+            # one opened yesterday. A forecast with a horizon is only actionable
+            # for that horizon, and a strategy that cannot time its own exit
+            # holds until something else closes it.
+            if perp_pos is not None and perp_pos.qty_qc and perp_pos.opened_ms:
+                position_age_ms = max(0, now_ms - perp_pos.opened_ms)
 
         return StrategyContext(
             now_ms=now_ms,
