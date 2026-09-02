@@ -192,6 +192,7 @@ class PassiveQuoteStrategy(TradingStrategy):
                 fair_value_cc=mid_cc,
                 qty_qc=qty_qc,
                 schedule=fee_schedule_for(ctx),
+                passive=True,
             ),
             reason="passive_quote",
             extra={

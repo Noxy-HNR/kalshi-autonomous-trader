@@ -214,3 +214,92 @@ class TestEdgeIsSignedTheSameWayEverywhere:
         from kat.common.enums import OutcomeSide
 
         assert self._intent(OutcomeSide.NO, 8_500, None).edge_cc() is None
+
+
+class TestAPassiveOrderIsJudgedOnAMakersEconomics:
+    """min_edge_cc asks whether an edge justifies *crossing* the spread.
+
+    A post-only order never crosses. Its edge is the half-spread it will earn,
+    so requiring that half to clear a bar sized for the whole spread demands a
+    four-cent market to justify earning two -- and it blocked exactly the trades
+    whose economics are best, the only structure measured on this venue that is
+    positive before any forecast.
+
+    min_expected_value_micros still does the economic work either way: it is
+    computed net of a round trip of fees.
+    """
+
+    @staticmethod
+    def _state():
+        from kat.risk.event_risk import EventAccountState
+
+        return EventAccountState(
+            balance_micros=100_000_000, peak_equity_micros=100_000_000, updated_at_ms=1_000
+        )
+
+    @staticmethod
+    def _intent(*, post_only: bool, fair_value_cc: int, limit_price_cc: int):
+        from kat.common.enums import MarketType, OutcomeSide
+        from kat.risk.types import OrderIntent
+
+        intent = OrderIntent(
+            market_type=MarketType.EVENT,
+            ticker="X",
+            qty_qc=200,
+            limit_price_cc=limit_price_cc,
+            outcome_side=OutcomeSide.YES,
+            fair_value_cc=fair_value_cc,
+            expected_value_micros=1_000_000,
+        )
+        intent.post_only = post_only
+        return intent
+
+    def _verdict(self, intent):
+        from kat.config.settings import EventRiskSettings
+        from kat.risk.event_risk import EventRiskEngine
+
+        return EventRiskEngine(EventRiskSettings()).evaluate(
+            intent, self._state(), book=None, now_ms=1_000, estimated_fees_micros=0
+        )
+
+    def test_a_taker_still_faces_the_full_bar(self):
+        """A 100-centicent edge does not justify crossing a 200-centicent bar."""
+        verdict = self._verdict(
+            self._intent(post_only=False, fair_value_cc=9_100, limit_price_cc=9_000)
+        )
+        assert not verdict.approved
+        assert verdict.reason_code == "INSUFFICIENT_EDGE"
+
+    def test_the_same_edge_passes_when_it_is_being_earned(self):
+        """Resting for the same 100 centicents is a different trade."""
+        verdict = self._verdict(
+            self._intent(post_only=True, fair_value_cc=9_100, limit_price_cc=9_000)
+        )
+        assert verdict.approved, verdict.reason
+
+    def test_a_passive_order_still_has_to_beat_its_fee(self):
+        """The floor becomes one fee -- one leg, one fee -- not nothing."""
+        verdict = self._verdict(
+            self._intent(post_only=True, fair_value_cc=5_002, limit_price_cc=5_000)
+        )
+        assert not verdict.approved
+        assert verdict.reason_code == "INSUFFICIENT_EDGE"
+
+    def test_the_floor_is_one_fee_not_two(self):
+        """One intent is one leg. It earns half the spread and pays one fee; the
+        second fee arrives with the second leg, which earns its own half."""
+        from kat.common.fixedpoint import QC_PER_CONTRACT
+        from kat.kalshi.fees import estimate_fee_micros
+
+        fee_cc = estimate_fee_micros(price_cc=9_000, qty_qc=QC_PER_CONTRACT).fee_micros // 100
+        # An edge just over one fee passes; the same edge under it does not.
+        assert self._verdict(
+            self._intent(
+                post_only=True, fair_value_cc=9_000 + fee_cc + 5, limit_price_cc=9_000
+            )
+        ).approved
+        assert not self._verdict(
+            self._intent(
+                post_only=True, fair_value_cc=9_000 + fee_cc - 5, limit_price_cc=9_000
+            )
+        ).approved

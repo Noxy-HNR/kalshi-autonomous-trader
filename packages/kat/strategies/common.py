@@ -45,7 +45,7 @@ from typing import Any, ClassVar
 from kat.common.enums import BookSide, MarketType, OutcomeSide, StrategyState
 from kat.common.errors import ConfigError
 from kat.common.fixedpoint import CC_PER_DOLLAR, QC_PER_CONTRACT, Rounding, parse_dollars_micros
-from kat.kalshi.fees import FeeSchedule, round_trip_fee_micros
+from kat.kalshi.fees import FeeSchedule, estimate_fee_micros, round_trip_fee_micros
 from kat.marketdata.book import OrderBook
 from kat.risk.types import OrderIntent
 from kat.strategies.base import Strategy, StrategyContext, StrategyMetadata, StrategyParam
@@ -402,6 +402,7 @@ def event_costing(
     fair_value_cc: int,
     qty_qc: int,
     schedule: FeeSchedule,
+    passive: bool = False,
 ) -> Costing:
     """Expected value of buying ``qty_qc`` of ``side`` at ``cost_cc``.
 
@@ -415,12 +416,25 @@ def event_costing(
     value_cc = fair_value_cc if side is OutcomeSide.YES else CC_PER_DOLLAR - fair_value_cc
     edge_cc = value_cc - cost_cc
     gross_micros = edge_cc * qty_qc
-    fees_micros = round_trip_fee_micros(
-        entry_price_cc=cost_cc,
-        exit_price_cc=clamp_price_cc(value_cc),
-        qty_qc=qty_qc,
-        schedule=schedule,
-    )
+    if passive:
+        # One leg, one fee.
+        #
+        # A resting buy at the bid earns half the spread and pays one fee. The
+        # other fee arrives with the leg that sells at the ask, and that leg
+        # earns the other half. Charging a round trip against a half-spread
+        # costs a maker's round trip four fees where it pays two, and it is
+        # enough on this venue to make an edge that clears its costs look like
+        # one that does not.
+        fees_micros = estimate_fee_micros(
+            price_cc=cost_cc, qty_qc=qty_qc, schedule=schedule, is_taker=False
+        ).fee_micros
+    else:
+        fees_micros = round_trip_fee_micros(
+            entry_price_cc=cost_cc,
+            exit_price_cc=clamp_price_cc(value_cc),
+            qty_qc=qty_qc,
+            schedule=schedule,
+        )
     return Costing(
         qty_qc=qty_qc,
         cost_cc=cost_cc,

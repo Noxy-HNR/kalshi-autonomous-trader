@@ -24,9 +24,13 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 
 from kat.common.enums import MarketType, OutcomeSide, RiskDecision
-from kat.common.fixedpoint import CC_PER_DOLLAR, micros_to_decimal
+from kat.common.fixedpoint import (
+    CC_PER_DOLLAR,
+    QC_PER_CONTRACT,
+    micros_to_decimal,
+)
 from kat.config.settings import EventRiskSettings
-from kat.kalshi.fees import prorate_fee_micros
+from kat.kalshi.fees import estimate_fee_micros, prorate_fee_micros
 from kat.marketdata.book import OrderBook
 from kat.observability.logging import get_logger
 from kat.observability.metrics import M_RISK_REJECTIONS, metrics
@@ -471,10 +475,40 @@ class EventRiskEngine:
         if not is_reducing:
             if intent.fair_value_cc is not None:
                 edge = self._edge_cc(intent)
-                ok = edge >= self.settings.min_edge_cc
+                # A resting order is not paying the spread, it is being paid it.
+                #
+                # min_edge_cc asks whether an edge justifies crossing, and for a
+                # taker the spread is the largest part of what crossing costs. A
+                # post-only order never crosses: its edge *is* the half-spread it
+                # will earn, so requiring that half to clear a bar sized for the
+                # whole thing demands a four-cent spread to justify earning two.
+                # It blocked exactly the trades whose economics are best -- the
+                # only structure measured on this venue that is positive before
+                # any forecast.
+                #
+                # The floor becomes one fee, because this intent is one leg. A
+                # passive buy at the bid earns half the spread and pays one fee;
+                # the second fee arrives with the second leg, which earns its own
+                # half. Charging both against one half is the same double-count
+                # in a different place, and it put the bar at twice what the
+                # strategy's own economics require.
+                #
+                # The padded estimate rather than the realised fee, because this
+                # is a gate: an unknown schedule must not make a marginal trade
+                # look affordable. min_expected_value_micros below still does the
+                # economic work, computed net of a full round trip either way.
+                floor = self.settings.min_edge_cc
+                if intent.post_only:
+                    fee = estimate_fee_micros(
+                        price_cc=intent.limit_price_cc,
+                        qty_qc=QC_PER_CONTRACT,
+                    )
+                    floor = fee.fee_micros // 100
+                ok = edge >= floor
                 checks.append(
                     CheckResult("min_edge", ok,
-                                limit=str(self.settings.min_edge_cc), observed=str(edge))
+                                limit=str(floor), observed=str(edge),
+                                detail="passive: fee floor" if intent.post_only else None)
                 )
                 if not ok:
                     return self._rejected(
