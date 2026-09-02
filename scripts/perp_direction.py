@@ -33,8 +33,27 @@ Then the part that matters: expected value per trade, in basis points, with the
 round trip already subtracted, sliced by how confident the model is *and* how
 volatile the market is.
 
-The result, and why it is not a strategy
-----------------------------------------
+A correction, and the thing it reveals
+--------------------------------------
+The numbers below were measured on ten days of fitting and four of testing, and
+they do not replicate. Re-run on forty-five days and twelve, the same
+top-decile-of-both cell gives 55.6% accuracy rather than 65.1%, against a
+break-even bar of 126.3% rather than 72.6%, for an expected value of -108bp
+rather than -2.42bp. The short window was not merely noisy, it was flattering.
+
+The reason is worth more than the model was. A bar above 100% means the cost
+exceeds the move outright: in that cell the round trip is about 112bp against a
+73.5bp move. High volatility on these markets arrives with proportionally wider
+spreads, so selecting for windows that move is also selecting for windows that
+are expensive, and the two cancel. That is why picking the volatile tail cannot
+rescue a directional edge here, and it is a property of the venue rather than of
+any model fitted to it.
+
+Both sets of figures are kept below, because the difference between them is the
+finding.
+
+The result on the short window, and why it is not a strategy
+------------------------------------------------------------
 The two properties do coincide. Accuracy rises from 52.3% pooled to 67.9% on
 the windows that are both confidently predicted and genuinely moving, and
 expected value rises with it from -14.84bp to about zero.

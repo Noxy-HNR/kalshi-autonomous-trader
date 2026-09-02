@@ -55,6 +55,15 @@ Crossing keeps the 65% and needs 72.6%. Resting needs only 63.5% and delivers
 property of resting on a directional forecast rather than of this model, this
 horizon, or this venue.
 
+And the crossing door is shut harder than those figures suggest. The 65% and the
+72.6% both come from a four-day test window and neither survives a twelve-day
+one: the same cell gives 55.6% against a bar of 126.3%. A bar above 100% means
+the round trip costs more than the move is worth -- about 112bp against 73.5bp
+-- because on these markets the windows that move are also the windows with wide
+spreads, and selecting for one selects for the other. The volatile tail cannot
+be picked out cheaply, which removes the last place a directional edge could
+have hidden.
+
 The strategy is kept because the measurement is worth being able to repeat, and
 because a later model that beats 72.6% crossing would not need any of this. It
 is not armed.
