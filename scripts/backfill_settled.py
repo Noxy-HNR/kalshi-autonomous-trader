@@ -108,6 +108,24 @@ async def _client() -> KalshiHTTPClient:
     )
 
 
+async def discover_series(rest: EventContractsREST, *, max_pages: int) -> list[str]:
+    """Series to try, taken from what is trading now.
+
+    The global settled feed cannot be enumerated: 5,999 of 6,000 rows on it are
+    KXMVECROSSCATEGORY parlay shards, which settle constantly and never trade.
+    The open board is the usable index -- a series with markets open today is a
+    series whose settled history is worth asking for by name.
+    """
+    markets = await rest.get_markets_via_events(
+        status="open", limit=200, max_pages=max_pages
+    )
+    counts: dict[str, int] = {}
+    for market in markets:
+        if market.series_ticker:
+            counts[market.series_ticker] = counts.get(market.series_ticker, 0) + 1
+    return sorted(counts, key=lambda s: -counts[s])
+
+
 async def settled_markets(
     http: KalshiHTTPClient, series: str, *, max_pages: int
 ) -> list[dict[str, Any]]:
@@ -215,6 +233,9 @@ async def backfill_market(
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--series", nargs="*", default=list(DEFAULT_SERIES))
+    parser.add_argument("--discover", action="store_true",
+                        help="take series from the open board instead of the "
+                             "built-in list, and try every one of them")
     parser.add_argument("--hours", type=int, default=DEFAULT_HOURS)
     parser.add_argument("--max-pages", type=int, default=3,
                         help="pages of settled markets per series, 200 each")
@@ -235,8 +256,15 @@ async def main() -> int:
             r["ticker"]
             for r in await conn.fetch("select distinct ticker from settlements")
         }
-        for series in args.series:
+        series_list = args.series
+        if args.discover:
+            series_list = await discover_series(rest, max_pages=12)
+            print(f"  discovered {len(series_list)} series on the open board")
+
+        for series in series_list:
             markets = await settled_markets(http, series, max_pages=args.max_pages)
+            if not markets:
+                continue
             fresh = [m for m in markets if m.get("ticker") not in have]
             took = 0
             for market in fresh:
@@ -251,8 +279,9 @@ async def main() -> int:
                     quoted_minutes += minutes
                 else:
                     skipped += 1
-            print(f"  {series:<14} settled={len(markets):>4} new={len(fresh):>4} "
-                  f"banked={took:>4}")
+            if took or len(fresh):
+                print(f"  {series:<26} settled={len(markets):>5} new={len(fresh):>5} "
+                      f"banked={took:>4}")
         print(f"\n  banked {kept} markets, {quoted_minutes:,} quoted minutes; "
               f"skipped {skipped} that never traded")
     finally:
