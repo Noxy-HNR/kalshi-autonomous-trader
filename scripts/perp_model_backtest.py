@@ -246,8 +246,9 @@ def main() -> int:
             filled_acc = right / len(directional)
             print(f"  direction on FILLED trades: {filled_acc:.1%} "
                   f"over {len(directional):,}")
-            print(f"  the model scored ~65% on the windows it fired on; the gap")
-            print(f"  between those two is what a resting entry selects away.")
+            print("  the model's own accuracy on the windows it fired on is")
+            print("  printed by perp_direction.py; the gap between that and this")
+            print("  is what a resting entry selects away.")
 
     for strategy in engine.strategies:
         health = strategy.health()
