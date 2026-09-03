@@ -65,6 +65,11 @@ BACKOFF_S = 30.0
 #: banked.
 FLUSH_EVERY = 50
 
+#: Postgres advisory-lock key, so only one collector polls the board at a time.
+#: Arbitrary but fixed; it only has to not collide with another lock in this
+#: database.
+_LOCK_KEY = 0x504D_424B
+
 
 
 async def _open_markets(rest: PolymarketREST) -> list[Any]:
@@ -205,6 +210,18 @@ async def main() -> int:
 
     dsn = re.sub(r"^postgresql\+\w+", "postgresql", str(AppSettings().database.url))
     conn = await asyncpg.connect(dsn)
+
+    # One collector at a time, enforced where both would meet rather than by
+    # remembering not to start a second. A scheduled task and a hand-started
+    # run will otherwise both poll the whole board: twice the rows, twice the
+    # load on a free public endpoint, and no more information than one pass.
+    # The lock is held for the life of the session and released when it ends,
+    # including on a kill, which a pid file would not manage.
+    if not await conn.fetchval("select pg_try_advisory_lock($1)", _LOCK_KEY):
+        log.warning("polymarket.already_collecting", lock=_LOCK_KEY)
+        await conn.close()
+        return 0
+
     rest = PolymarketREST()
 
     stop = asyncio.Event()
