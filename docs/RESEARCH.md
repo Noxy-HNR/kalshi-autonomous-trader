@@ -70,6 +70,40 @@ The clearest single result in the project:
 The cheap entry and the accuracy cannot be had together. That is a property of
 resting on a directional forecast, not of this model or venue.
 
+## The information door, and why it is shut too
+
+Every structure above searches for an edge *inside the price data*. The obvious
+remaining category is an edge from outside it: Kalshi markets settle on
+real-world measurements, and for weather the US government publishes both the
+forecast and the observations for free, at the exact stations Kalshi settles on.
+``api.weather.gov`` needs no key.
+
+Two versions of the idea, and the market has already taken both.
+
+**Forecasting.** NWS publishes a next-day high for each station. But so does
+everyone's phone, and the market reads it: 12-24 hours out the price scores
+0.80 AUC, which is roughly what next-day forecast skill supports.
+
+**Nowcasting.** These settle on a station's observed daily *high*, and by
+mid-afternoon that number is largely already set. A market slow to converge on
+an outcome that is no longer uncertain would be free money. It is not slow:
+
+| family      | 12-24h out | 6-12h  | 3-6h   |
+| ----------- | ---------- | ------ | ------ |
+| KXHIGHNY    | 0.7995     | 0.9021 | 0.9950 |
+| KXHIGHLAX   | 0.8536     | 0.9847 | --     |
+| KXHIGHMIA   | 0.8513     | 0.9224 | --     |
+| KXHIGHCHI   | 0.8000     | 0.8875 | --     |
+
+They close at 05:00-06:00 UTC, so "3-6h out" is evening local -- hours after the
+day's high is set. New York prices it at 0.9950. Somebody is watching the
+observations, and the price already contains them.
+
+The check cost two API calls and one existing script, which is the argument for
+having built ``price_baseline.py``: an information edge is only an edge where the
+price does not already hold the information, and that is measurable before any
+data pipeline is written.
+
 ## Six results that were wrong
 
 Every one looked real. Each is recorded because the detection method is worth
