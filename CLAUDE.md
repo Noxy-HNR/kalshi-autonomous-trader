@@ -4,11 +4,20 @@ Guidance for Claude Code (or any agent) working in this repository.
 
 ## What this is
 
-An autonomous trading platform for Kalshi event contracts and Kalshi perpetual
-futures. One long-lived native process (no Docker, no containers, no shell
-scripts at runtime) handles market-data ingestion, two independent trading
-domains, risk, execution, research, and a dashboard API. Full narrative is in
+An autonomous trading platform for event contracts and perpetual futures. One
+long-lived native process (no Docker, no containers, no shell scripts at
+runtime) handles market-data ingestion, two independent trading domains, risk,
+execution, research, and a dashboard API. Full narrative is in
 [README.md](README.md); the real depth is in `docs/`.
+
+**Read [docs/RESEARCH.md](docs/RESEARCH.md) before proposing a strategy.** Twelve
+structures were measured on Kalshi and all twelve lost, for a reason that is
+about the venue rather than the ideas: a fee peaking at 350 basis points and a
+one-cent minimum tick, against a market that prices settlement at 0.7764 AUC.
+The platform has since been pointed at **Polymarket US**, which lists the same
+instrument on the same quadratic formula with a maker coefficient of **-0.0125**
+-- it pays the maker -- and a tick of a tenth of a cent. `kat.polymarket` holds
+that venue; it is read-only by construction and cannot place an order.
 
 ## The one rule that overrides everything else
 
@@ -101,7 +110,15 @@ Package map (`packages/kat/`): `common` (fixed-point money, Clock, ids),
 `marketdata` (hot path), `risk` (invariants, kill switches),
 `execution` (order state machine, reconciliation), `portfolio`, `strategies`,
 `features`, `models`, `simulation` (backtester), `arbitrage`, `news`, `llm`
-(advisory, no authority), `engine` (lifecycle/entrypoint).
+(advisory, no authority), `engine` (lifecycle/entrypoint),
+`polymarket` (public-gateway reads and the venue's fee model).
+
+A **fee is signed** on Polymarket: the maker coefficient is negative, so
+`polymarket_fee_micros` returns income as a negative number and `net = gross -
+fee` stays correct for both. Never take `abs()` of it -- that silently turns a
+rebate into a cost. The safety margin for an unknown schedule *divides* a rebate
+and multiplies a cost, because inflating an uncertain rebate is a safety margin
+pointed the wrong way.
 
 ## Conventions (non-negotiable, not just style)
 

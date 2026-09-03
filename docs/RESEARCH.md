@@ -125,6 +125,58 @@ a model is never read against 0.5), `scripts/settlement_bias.py` (one row per
 market, never per minute), and `scripts/perp_horizon_sweep.py` (windows stepped
 by the horizon, never overlapped).
 
+## The venue changed
+
+Everything above is a finding about Kalshi, not about prediction markets. Twelve
+structures failed there for one recurring reason -- the tolls exceed anything a
+small account can find -- and two numbers set those tolls: a fee coefficient of
+0.07 charged to both sides, and a one-cent minimum tick that on a three-cent
+contract is a third of the notional.
+
+Polymarket US is a CFTC-regulated designated contract market listing the same
+instrument, priced on the same quadratic formula, differing only in those
+numbers:
+
+|                 | Kalshi     | Polymarket US |
+| --------------- | ---------- | ------------- |
+| taker theta     | 0.07       | 0.06          |
+| **maker theta** | **0.07**   | **-0.0125**   |
+| minimum tick    | $0.01      | $0.001        |
+| minimum order   | 1 contract | 1 contract    |
+
+The maker coefficient is negative: the exchange pays for a resting quote rather
+than charging for one. Surveyed across 355 live two-sided books, priced twice --
+once on each schedule -- the maker round trip is positive on **all 355** here and
+on 169 under Kalshi's terms. The gap is widest exactly where the volume is:
+
+| mid band | med spread | Polymarket RT | Kalshi RT | med queue |
+| -------- | ---------- | ------------- | --------- | --------- |
+| 10-20c   | 100        | +124          | -190      | 16        |
+| 30-40c   | 100        | +158          | -394      | 182       |
+| 40-50c   | 100        | +160          | -424      | 651       |
+| 60-70c   | 100        | +157          | -365      | 153       |
+
+217 markets clear a positive round trip **and** a queue under 500 contracts.
+That pair is what Kalshi never offered in a single market: there, where the
+volume was the touch held a median of 124,000 contracts, and where the queue was
+short nothing traded.
+
+### What this is not
+
+Evidence that market making works. It is evidence that the economics are
+positive *before* adverse selection, which on Kalshi they were not. Adverse
+selection is what killed passive quoting on both Kalshi instruments and it is
+invisible in a snapshot: a resting order is reached only when the market trades
+*through* it, a narrower and more hostile subset of the flow than any survey
+sees.
+
+Settling it needs book history, and this exchange sells none -- its candles carry
+open/high/low/close/volume and no bid or ask, and that endpoint is authenticated
+anyway. The Kalshi work leaned on candles that included both sides of the book,
+which is what let strategies be backtested against history that already existed.
+There is no such shortcut here, so `scripts/polymarket_collect.py` banks books as
+they happen, into the same `quotes` table everything else reads.
+
 ## What would change the answer
 
 1. **Real perpetual book depth.** Every perp result rests on candle summaries —
@@ -139,8 +191,10 @@ by the horizon, never overlapped).
    With those, the engine banks real books and microprice quoting — the standard
    mitigation for the adverse selection measured above — becomes testable.
 
-2. **A cheaper venue.** The fill simulator, fee models, walk-forward splits and
-   artifact detection are venue-agnostic. The costs are not.
+2. **A cheaper venue.** Done -- see "The venue changed" above. The fill
+   simulator, fee models, walk-forward splits and artifact detection all
+   transferred unchanged; only the REST client and the fee coefficients were
+   venue-specific.
 
 ## Reproducing any of it
 
