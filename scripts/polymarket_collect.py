@@ -44,7 +44,7 @@ from kat.common.fixedpoint import CC_PER_DOLLAR
 from kat.config.settings import AppSettings
 from kat.observability.logging import configure_logging, get_logger
 from kat.polymarket.rest import PolymarketREST
-from kat.polymarket.selection import maker_edge_cc, rank_by_reachability
+from kat.polymarket.selection import maker_edge_cc, rank_tradeable
 
 log = get_logger(__name__)
 
@@ -231,7 +231,7 @@ async def collect(
         found = 0
         gap = 1.0 / RATE_LIMIT_PER_S
         sweeping = not quotable
-        candidates: list[tuple[Any, int, int]] = []
+        candidates: list[tuple[Any, int, int, int | None]] = []
         pass_over = markets if sweeping else [
             m for m in markets if m.slug in quotable
         ]
@@ -267,24 +267,28 @@ async def collect(
             if bid is None or ask is None or not 0 < bid < ask < CC_PER_DOLLAR:
                 continue
             found += 1
+
+            # Cumulative traded count: differenced into per-interval flow while
+            # following, and read during a sweep to tell a market that is quiet
+            # from one that has never traded at all. The sweep costs twice as
+            # long for it, which at once per six hours is worth paying --
+            # ranking without it produced a follow set with zero trades in 297
+            # intervals, on a venue doing 1,473 contracts an hour.
             shares = last = None
-            if not sweeping:
-                # Cumulative traded count, differenced later into per-interval
-                # flow. Only for the follow set: a sweep is already thirteen
-                # minutes and doubling it to price flow on markets we are about
-                # to discard would buy nothing.
-                delay = next_at - loop.time()
-                if delay > 0:
-                    await asyncio.sleep(delay)
-                next_at = loop.time() + gap
-                with contextlib.suppress(ExchangeError):
-                    shares, last = await rest.get_flow(market.slug)
+            delay = next_at - loop.time()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            next_at = loop.time() + gap
+            with contextlib.suppress(ExchangeError):
+                shares, last = await rest.get_flow(market.slug)
+
             if sweeping:
                 edge = maker_edge_cc(market, book)
                 if edge is not None:
                     candidates.append((
                         market, edge,
                         min(book.best_bid_size_qc, book.best_ask_size_qc),
+                        shares,
                     ))
             else:
                 quotable.add(market.slug)
@@ -301,10 +305,11 @@ async def collect(
         written += await _flush(db, rows)
 
         if sweeping:
-            quotable = set(rank_by_reachability(candidates, follow))
+            quotable = set(rank_tradeable(candidates, follow))
             log.info(
                 "polymarket.following",
                 followed=len(quotable), quotable=len(candidates),
+                ever_traded=sum(1 for c in candidates if c[3]),
                 # A budget, not a measurement: two requests per followed
                 # market -- the book for the queue, the bbo for the traded
                 # counter -- so the pacing floor is twice the naive one. What a

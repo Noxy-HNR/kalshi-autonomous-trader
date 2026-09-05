@@ -138,10 +138,17 @@ class PolymarketREST:
                 break
         return out
 
-    async def get_market(self, slug: str) -> PolymarketMarket:
-        payload = await self._get(f"/v1/markets/{slug}")
-        market = payload.get("market") or payload
-        return PolymarketMarket.parse(market)
+    async def get_market(self, slug: str) -> PolymarketMarket | None:
+        """One market by slug, or None when the venue does not know it.
+
+        Through the listing endpoint's ``slug`` filter rather than a path
+        segment: ``/v1/markets/{slug}`` is not a route and returns 404 for every
+        market that exists. The book and bbo *are* addressed that way, which is
+        what made the wrong guess look reasonable.
+        """
+        payload = await self._get("/v1/markets", {"slug": slug, "limit": 1})
+        markets = payload.get("markets") or []
+        return PolymarketMarket.parse(markets[0]) if markets else None
 
     # -- book ----------------------------------------------------------------
 

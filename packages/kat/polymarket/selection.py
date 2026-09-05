@@ -62,6 +62,12 @@ def rank_by_reachability(
     means we would be first in line, which is the best case and not an infinite
     one, and dividing by zero to express that would rank a market on a rounding
     artifact.
+
+    This ranks on reachability alone and is therefore only half a selector --
+    see :func:`rank_tradeable`, which is what the collector should use. Kept
+    because it is the honest expression of "which queue could we reach", and
+    because separating that from "which markets trade" is what made the
+    difference visible.
     """
     scored = [
         (edge / max(queue, QC_PER_CONTRACT), market.slug)
@@ -70,5 +76,38 @@ def rank_by_reachability(
     ]
     # Slug breaks ties so the follow set is stable between sweeps: an unstable
     # set silently restarts each market's history every six hours.
+    scored.sort(key=lambda pair: (-pair[0], pair[1]))
+    return [slug for _, slug in scored[:limit]]
+
+
+def rank_tradeable(
+    candidates: list[tuple[Any, int, int, int | None]], limit: int
+) -> list[str]:
+    """Rank on reachability, but only among markets that actually trade.
+
+    ``candidates`` are ``(market, edge_cc, queue_qc, traded_qc)``, where
+    ``traded_qc`` is the venue's cumulative traded counter -- None when the
+    market has never reported one.
+
+    Ranking on reachability alone was measurably wrong, and wrong in a way that
+    hid its own error. It favours short queues; a short queue usually means few
+    people are quoting; and few quoters correlates with few takers. The first
+    follow set built that way reported **zero trades in 297 intervals**, while a
+    broad unranked sample of the same venue found 15% of counter-reporting
+    markets trading and 1,473 contracts an hour. The ranking had selected the
+    markets most likely to report nothing.
+
+    Requiring a non-zero counter fixes it without discarding the insight, which
+    was sound: measured against the markets that did trade, a short queue is
+    exactly what produces fills. Six contracts of queue against 239 traded an
+    hour is twenty fills an hour; 102,299 of queue against 63 is none. Flow is
+    worthless behind a deep queue and a short queue is worthless without flow,
+    and only markets with both are worth a slot.
+    """
+    scored = [
+        (edge / max(queue, QC_PER_CONTRACT), market.slug)
+        for market, edge, queue, traded in candidates
+        if edge > 0 and traded
+    ]
     scored.sort(key=lambda pair: (-pair[0], pair[1]))
     return [slug for _, slug in scored[:limit]]

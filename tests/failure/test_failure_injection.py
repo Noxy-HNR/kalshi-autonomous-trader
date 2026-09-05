@@ -192,10 +192,23 @@ class TestRateLimiting:
         assert await limiter.acquire("event_read", 10, max_wait_s=0.0) is False
 
     async def test_a_429_drains_the_bucket_to_resynchronise(self):
-        """A 429 means our accounting was more optimistic than the exchange's."""
+        """A 429 means our accounting was more optimistic than the exchange's.
+
+        Asserted against a second's worth of refill rather than against zero.
+        ``snapshot`` refills before reporting, so an exact-zero assertion is
+        really a claim that no measurable time passes between two statements --
+        which held until the suite ran on a busy machine and the process was
+        descheduled for a few milliseconds between them.
+        """
         limiter = RateLimiter()
+        before = limiter.snapshot()["event_write"]
+        assert before["tokens"] > 0, "bucket should start full"
+
         limiter.note_429("event_write")
-        assert limiter.snapshot()["event_write"]["tokens"] == 0
+
+        after = limiter.snapshot()["event_write"]
+        assert after["tokens"] < before["tokens"]
+        assert after["tokens"] <= after["refill_per_s"]
 
     async def test_a_declined_acquisition_raises_rather_than_blocking(self):
         def handler(request: httpx.Request) -> httpx.Response:

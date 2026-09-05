@@ -145,3 +145,40 @@ class TestMarketParsing:
         assert m.slug == "s"
         assert m.is_tradeable is False
         assert m.fees.exact is False
+
+
+class TestMarketLookupUsesTheRightRoute:
+    """``/v1/markets/{slug}`` is not a route and 404s for every market.
+
+    The book and bbo *are* addressed that way -- ``/v1/markets/{slug}/book``
+    works -- which is what made the wrong guess look reasonable and why every
+    call in an analysis script failed identically until one was isolated.
+    """
+
+    def test_it_queries_the_listing_endpoint_with_a_slug_filter(self):
+        import asyncio
+
+        from kat.polymarket.rest import PolymarketREST
+
+        seen: dict[str, object] = {}
+
+        class _Fake(PolymarketREST):
+            async def _get(self, path, params=None):
+                seen["path"], seen["params"] = path, params
+                return {"markets": [dict(MARKET)]}
+
+        got = asyncio.run(_Fake().get_market("some-slug"))
+        assert seen["path"] == "/v1/markets"
+        assert (seen["params"] or {}).get("slug") == "some-slug"
+        assert got is not None and got.slug == MARKET["slug"]
+
+    def test_an_unknown_slug_is_none_rather_than_a_raise(self):
+        import asyncio
+
+        from kat.polymarket.rest import PolymarketREST
+
+        class _Empty(PolymarketREST):
+            async def _get(self, path, params=None):
+                return {"markets": []}
+
+        assert asyncio.run(_Empty().get_market("nope")) is None

@@ -100,3 +100,43 @@ class TestRankingIsOnReachabilityNotEdge:
 
     def test_nothing_in_nothing_out(self):
         assert rank_by_reachability([], 60) == []
+
+
+class TestOnlyMarketsThatTradeAreFollowed:
+    """Ranking on reachability alone was wrong in a way that hid its own error.
+
+    It favours short queues; a short queue usually means few people quoting;
+    few quoters correlates with few takers. The first follow set built that way
+    reported zero trades in 297 intervals, while a broad unranked sample of the
+    same venue found 15% of counter-reporting markets trading and 1,473
+    contracts an hour. The ranking had selected the markets most likely to
+    report nothing, and then been believed.
+    """
+
+    def test_a_market_that_has_never_traded_is_not_followed(self):
+        from kat.polymarket.selection import rank_tradeable
+
+        assert rank_tradeable([(_Market("never"), 500, 100, None)], 10) == []
+        assert rank_tradeable([(_Market("never"), 500, 100, 0)], 10) == []
+
+    def test_among_traders_the_short_queue_still_wins(self):
+        """The original insight was sound and is kept: measured against markets
+        that did trade, six contracts of queue against 239 traded an hour is
+        twenty fills an hour, and 102,299 of queue against 63 is none."""
+        from kat.polymarket.selection import rank_tradeable
+
+        deep = (_Market("deep"), 44, 10_229_900, 6_300)
+        thin = (_Market("thin"), 44, 600, 23_900)
+        assert rank_tradeable([deep, thin], 1) == ["thin"]
+
+    def test_a_dead_market_loses_to_a_worse_but_live_one(self):
+        from kat.polymarket.selection import rank_tradeable
+
+        dead_but_perfect = (_Market("dead"), 900, 100, None)
+        live_but_thin = (_Market("live"), 10, 100_000, 500)
+        assert rank_tradeable([dead_but_perfect, live_but_thin], 2) == ["live"]
+
+    def test_it_still_drops_markets_whose_round_trip_does_not_pay(self):
+        from kat.polymarket.selection import rank_tradeable
+
+        assert rank_tradeable([(_Market("loses"), -5, 100, 9_999)], 5) == []
