@@ -161,6 +161,34 @@ That pair is what Kalshi never offered in a single market: there, where the
 volume was the touch held a median of 124,000 contracts, and where the queue was
 short nothing traded.
 
+### The open question: does anything trade here?
+
+Positive economics are a statement about prices. Whether anyone trades at them is
+a separate question, and two measurements disagree sharply:
+
+* 78% of open markets report zero `sharesTraded`, and the exchange's own busiest
+  show 0-1,828 against open interest of 71,000 to 427,000.
+* The banked books move constantly: touch size changes in 74% of observations,
+  and 2,016 of 3,560 markets have moved their touch at least once.
+
+Both can hold at once, and the combination is the worst case for a maker --
+makers quoting at each other with almost no takers. That is queue competition
+without flow, which is exactly what killed passive quoting on Kalshi's
+thin-queue markets, and a rebate does not repair it: being paid to quote is
+worth nothing if nothing ever lifts the quote.
+
+The deciding number is not volume. Fills go in time order, so a resting order is
+reached only after everything already at its price has traded. Flow divided by
+queue-ahead, per interval, is the fill rate a passive quote can expect --
+`scripts/polymarket_flow.py` reports it, from the cumulative counter the
+collector banks beside each book. The venue publishes no trades endpoint, so
+that counter differenced between passes is the only flow available.
+
+This is the same question the Kalshi survey asked and answered badly: it measured
+volume and queue separately and never divided one by the other, which is how a
+board with 879 markets trading a thousand contracts a day still produced nine
+round trips in seventy-two hours.
+
 ### What this is not
 
 Evidence that market making works. It is evidence that the economics are
