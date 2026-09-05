@@ -40,11 +40,11 @@ import sys
 from typing import Any
 
 from kat.common.errors import ExchangeError
-from kat.common.fixedpoint import CC_PER_DOLLAR, QC_PER_CONTRACT
+from kat.common.fixedpoint import CC_PER_DOLLAR
 from kat.config.settings import AppSettings
 from kat.observability.logging import configure_logging, get_logger
-from kat.polymarket.fees import polymarket_fee_micros
 from kat.polymarket.rest import PolymarketREST
+from kat.polymarket.selection import maker_edge_cc, rank_by_reachability
 
 log = get_logger(__name__)
 
@@ -104,41 +104,6 @@ DEFAULT_FOLLOW = 60
 async def _open_markets(rest: PolymarketREST) -> list[Any]:
     markets = await rest.get_open_markets(max_pages=8)
     return [m for m in markets if m.is_tradeable]
-
-
-def _maker_edge_cc(market: Any, book: Any) -> int | None:
-    """What one passive round trip earns here: the spread, plus both rebates.
-
-    Signed fees, so the rebate arrives negative and subtracting it adds income.
-    None when the book cannot be priced.
-    """
-    bid, ask = book.best_bid_cc, book.best_ask_cc
-    if bid is None or ask is None or not 0 < bid < ask < CC_PER_DOLLAR:
-        return None
-    mid = (bid + ask) // 2
-    fee = polymarket_fee_micros(
-        price_cc=mid, qty_qc=QC_PER_CONTRACT, schedule=market.fees, is_taker=False
-    ) // 100
-    return (ask - bid) - 2 * fee
-
-
-def _rank(candidates: list[tuple[Any, int, int]], limit: int) -> list[str]:
-    """Pick the markets worth following closely.
-
-    Ranked on reachability rather than on edge alone. A wide spread on a book
-    nobody trades into pays nothing, and the Kalshi work spent a long time
-    learning that the binding constraint is the queue ahead of a resting order,
-    not the spread in front of it. So the sort is by edge per contract of queue:
-    what the round trip pays, divided by how much has to trade before we are
-    reached.
-    """
-    scored = [
-        (edge / max(queue, QC_PER_CONTRACT), market.slug)
-        for market, edge, queue in candidates
-        if edge > 0
-    ]
-    scored.sort(reverse=True)
-    return [slug for _, slug in scored[:limit]]
 
 
 class _Db:
@@ -315,7 +280,7 @@ async def collect(
                 with contextlib.suppress(ExchangeError):
                     shares, last = await rest.get_flow(market.slug)
             if sweeping:
-                edge = _maker_edge_cc(market, book)
+                edge = maker_edge_cc(market, book)
                 if edge is not None:
                     candidates.append((
                         market, edge,
@@ -336,7 +301,7 @@ async def collect(
         written += await _flush(db, rows)
 
         if sweeping:
-            quotable = set(_rank(candidates, follow))
+            quotable = set(rank_by_reachability(candidates, follow))
             log.info(
                 "polymarket.following",
                 followed=len(quotable), quotable=len(candidates),
