@@ -88,9 +88,16 @@ _LOCK_KEY = 0x504D_424B
 #: after a resting order is filled, and a book observed twice an hour cannot
 #: distinguish a quote that was lifted on the way up from one that was run over.
 #:
-#: Following 120 markets instead gives a pass every twenty-four seconds. Fewer
+#: Following 60 markets instead gives a pass every twenty-four seconds. Fewer
 #: markets, but each one with a history fine enough to measure.
-DEFAULT_FOLLOW = 120
+#:
+#: Sixty rather than a hundred and twenty because each followed market costs two
+#: requests, not one: the book for the queue ahead of a resting order, and the
+#: bbo for the cumulative traded count. The venue publishes no trades endpoint,
+#: so flow has to be differenced out of that counter -- and a banked book with no
+#: flow beside it cannot be replayed at all, because a resting order is filled by
+#: the market trading through it. Half the markets, all of the data.
+DEFAULT_FOLLOW = 60
 
 
 
@@ -216,8 +223,10 @@ async def _write(conn: Any, rows: list[tuple[Any, ...]]) -> None:
         """
         insert into quotes
           (ticker, market_type, ts, bid_cc, ask_cc, bid_size_qc, ask_size_qc,
+           last_cc, volume_qc,
            source, source_ts, ingested_ts, quality)
-        values ($1, 'event', $2, $3, $4, $5, $6, 'polymarket', $2, now(), 'ok')
+        values ($1, 'event', $2, $3, $4, $5, $6, $7, $8,
+                'polymarket', $2, now(), 'ok')
         """,
         rows,
     )
@@ -293,6 +302,18 @@ async def collect(
             if bid is None or ask is None or not 0 < bid < ask < CC_PER_DOLLAR:
                 continue
             found += 1
+            shares = last = None
+            if not sweeping:
+                # Cumulative traded count, differenced later into per-interval
+                # flow. Only for the follow set: a sweep is already thirteen
+                # minutes and doubling it to price flow on markets we are about
+                # to discard would buy nothing.
+                delay = next_at - loop.time()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                next_at = loop.time() + gap
+                with contextlib.suppress(ExchangeError):
+                    shares, last = await rest.get_flow(market.slug)
             if sweeping:
                 edge = _maker_edge_cc(market, book)
                 if edge is not None:
@@ -307,6 +328,7 @@ async def collect(
                 dt.datetime.now(dt.UTC),
                 bid, ask,
                 book.best_bid_size_qc, book.best_ask_size_qc,
+                last, shares,
             ))
             if len(rows) >= FLUSH_EVERY:
                 written += await _flush(db, rows)

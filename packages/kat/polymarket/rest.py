@@ -38,7 +38,7 @@ from typing import Any
 from kat.common.errors import ExchangeError
 from kat.marketdata.book import OrderBook
 from kat.observability.logging import get_logger
-from kat.polymarket.models import PolymarketMarket, parse_book
+from kat.polymarket.models import PolymarketMarket, parse_book, price_cc
 
 __all__ = ["PUBLIC_GATEWAY", "PolymarketREST"]
 
@@ -151,9 +151,34 @@ class PolymarketREST:
         return parse_book(slug, payload, ts_ms=ts_ms)
 
     async def get_bbo(self, slug: str) -> dict[str, Any]:
-        """Top of book plus traded volume and open interest."""
+        """Top of book plus traded volume and open interest.
+
+        ``bidDepth`` and ``askDepth`` here are *level counts*, not sizes, so
+        this cannot replace :meth:`get_book` for anything that cares about the
+        queue ahead of a resting order -- which is most of why we are here.
+        What it adds is ``sharesTraded`` and ``lastTradePx``.
+        """
         payload = await self._get(f"/v1/markets/{slug}/bbo")
         return payload.get("marketData") or payload
+
+    async def get_flow(self, slug: str) -> tuple[int | None, int | None]:
+        """``(cumulative shares traded in qc, last traded price in cc)``.
+
+        The venue publishes no public trades endpoint -- ``/trades`` and
+        ``/markets/{slug}/trades`` are both 404 -- so flow has to be recovered
+        by differencing this counter between passes. Without it a banked book
+        cannot be replayed: the fill simulator fills a resting order when the
+        market trades *through* it, and a book with no prints beside it never
+        fills anything, which would read as a strategy that never trades rather
+        than as data that cannot answer the question.
+        """
+        data = await self.get_bbo(slug)
+        traded = data.get("sharesTraded")
+        try:
+            shares = None if traded in (None, "") else round(float(traded) * 100)
+        except (TypeError, ValueError):
+            shares = None
+        return shares, price_cc(data.get("lastTradePx"))
 
     # -- events --------------------------------------------------------------
 
