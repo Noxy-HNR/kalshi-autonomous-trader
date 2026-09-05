@@ -261,9 +261,19 @@ async def collect(
         pass_over = markets if sweeping else [
             m for m in markets if m.slug in quotable
         ]
+        next_at = loop.time()
         for market in pass_over:
             if stop.is_set():
                 break
+            # Pace to a rate, rather than sleeping a fixed gap after each
+            # request. Sleeping afterwards adds the round trip to the gap, so a
+            # 5/s budget ran at 2.4/s and a pass predicted at 24 seconds took
+            # 50. Waiting only for the remainder spends the network time instead
+            # of adding to it, and cannot exceed the rate whatever the latency.
+            delay = next_at - loop.time()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            next_at = loop.time() + gap
             try:
                 book = await rest.get_book(market.slug)
             except ExchangeError as exc:
@@ -274,7 +284,6 @@ async def collect(
                     )
                     break
                 continue
-            await asyncio.sleep(gap)
             if book is None:
                 quotable.discard(market.slug)
                 continue
@@ -309,7 +318,9 @@ async def collect(
             log.info(
                 "polymarket.following",
                 followed=len(quotable), quotable=len(candidates),
-                seconds_per_pass=round(len(quotable) / RATE_LIMIT_PER_S, 1),
+                # A budget, not a measurement. What a pass actually costs is
+                # reported per cycle as elapsed_s, and only that one is real.
+                paced_seconds_per_pass=round(len(quotable) / RATE_LIMIT_PER_S, 1),
             )
 
         cycles += 1
