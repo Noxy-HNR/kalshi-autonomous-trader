@@ -305,9 +305,14 @@ async def collect(
             log.info(
                 "polymarket.following",
                 followed=len(quotable), quotable=len(candidates),
-                # A budget, not a measurement. What a pass actually costs is
-                # reported per cycle as elapsed_s, and only that one is real.
-                paced_seconds_per_pass=round(len(quotable) / RATE_LIMIT_PER_S, 1),
+                # A budget, not a measurement: two requests per followed
+                # market -- the book for the queue, the bbo for the traded
+                # counter -- so the pacing floor is twice the naive one. What a
+                # pass actually costs is elapsed_s on each cycle, and only that
+                # one is measured.
+                paced_seconds_per_pass=round(
+                    2 * len(quotable) / RATE_LIMIT_PER_S, 1
+                ),
             )
 
         cycles += 1
