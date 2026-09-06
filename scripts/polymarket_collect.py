@@ -373,15 +373,39 @@ async def main() -> int:
         with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(sig, stop.set)
 
+    # Supervise rather than exit. Twice now this has run for most of a day and
+    # then stopped with exit code 1 and nothing in the log, because an unhandled
+    # exception's traceback goes to *stderr* -- and the scheduler discards that,
+    # so fixing the log file fixed only the half of the problem that was already
+    # being written down. Anything the loop raises is logged here, where it can
+    # be read, and then the loop is re-entered.
+    #
+    # The alternative, letting the process die and relying on the task's restart
+    # policy, was tried and did not fire: the task showed Ready with result 1 and
+    # stayed that way for fourteen hours while nothing collected.
+    attempt = 0
     try:
-        await collect(
-            db, rest,
-            interval_s=args.interval_s, stop=stop,
-            max_cycles=1 if args.once else None,
-            follow=args.follow,
-        )
-    except KeyboardInterrupt:
-        stop.set()
+        while not stop.is_set():
+            try:
+                await collect(
+                    db, rest,
+                    interval_s=args.interval_s, stop=stop,
+                    max_cycles=1 if args.once else None,
+                    follow=args.follow,
+                )
+                return 0
+            except KeyboardInterrupt:
+                stop.set()
+                return 0
+            except Exception:
+                attempt += 1
+                log.exception("polymarket.collect_crashed", attempt=attempt)
+                if not await db.reconnect():
+                    log.error("polymarket.giving_up", reason="lock lost or db down")
+                    return 1
+                await asyncio.wait(
+                    [asyncio.create_task(stop.wait())], timeout=BACKOFF_S
+                )
     finally:
         await db.close()
     return 0
@@ -392,3 +416,9 @@ if __name__ == "__main__":
         raise SystemExit(asyncio.run(main()))
     except KeyboardInterrupt:
         print("stopped", file=sys.stderr)
+    except BaseException:
+        # Last resort. Anything that escapes main() would otherwise reach only
+        # stderr, which the scheduler throws away -- the exact reason two
+        # multi-hour runs ended with an exit code and no explanation.
+        log.exception("polymarket.fatal")
+        raise
