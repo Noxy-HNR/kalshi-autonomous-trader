@@ -60,6 +60,34 @@ back in whatever mode its configuration says.
 
 ---
 
+## Polymarket collection (Windows scheduled tasks)
+
+Two tasks, both registered under the logged-in user, both verified by watching
+the database rather than by reading the task's own status -- a task can report
+`Running` while executing a bare Python REPL, and `Ready` with result 1 for
+fourteen hours while nothing collects.
+
+| task | what it does | where it writes |
+| --- | --- | --- |
+| `PolymarketBookCollector` | polls the public gateway continuously | `quotes`, `orderbook_snapshots`, `logs/polymarket.log` |
+| `PolymarketBacktestDaily` | replays the banked history at 09:00 | `logs/polymarket_backtest.log` |
+
+The collector supervises itself: it logs and re-enters its loop on any
+exception, reconnects to Postgres and re-takes its advisory lock, and holds that
+lock so a second instance refuses to start rather than double-polling a free
+public endpoint. It does *not* depend on the scheduler's restart policy, which
+was configured with `RestartCount 999` and did not fire.
+
+Checking it is healthy means looking at rows, not at Windows:
+
+```bash
+.venv/Scripts/python.exe scripts/polymarket_flow.py --hours 24
+```
+
+If `newest` is older than a couple of minutes, the collector is not running
+whatever the task says.
+
+
 ## Monitoring
 
 The dashboard's System tab shows process and host resources, queue depths, latency
