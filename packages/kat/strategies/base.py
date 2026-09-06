@@ -39,6 +39,7 @@ from typing import Any
 from kat.common.enums import MarketType, StrategyState
 from kat.kalshi.fees import PerpFeeSchedule
 from kat.marketdata.state import MarketSnapshot
+from kat.polymarket.fees import PolymarketFeeSchedule
 from kat.risk.types import OrderIntent
 
 __all__ = [
@@ -189,6 +190,14 @@ class StrategyContext:
     #: strategy that cannot see its own working orders re-quotes every cycle and
     #: stacks hundreds of them into one position instead of cycling.
     resting_qty_qc: int = 0
+    #: The venue's own fee coefficients, when this market is on Polymarket US.
+    #: The same quadratic form as a Kalshi event contract with a different taker
+    #: coefficient and a *negative* maker one -- the exchange pays a resting
+    #: quote. A strategy that screens with Kalshi's fee instead demands a spread
+    #: of 525 centicents at fifty cents, on a venue whose entire tick is ten, and
+    #: so declines every market on the board while reporting that the spread does
+    #: not cover its costs.
+    polymarket_fee_schedule: PolymarketFeeSchedule | None = None
     #: The perpetual's own maker and taker rates, when this is a perpetual.
     #: Perpetuals are charged a flat fraction of notional and event contracts a
     #: quadratic fee that at fifty cents is a hundred times larger, so a perp

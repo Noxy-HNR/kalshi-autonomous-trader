@@ -55,6 +55,7 @@ from kat.kalshi.fees import (
     perp_fee_micros,
 )
 from kat.marketdata.book import OrderBook
+from kat.polymarket.fees import PolymarketFeeSchedule, polymarket_fee_micros
 
 __all__ = [
     "FRICTIONLESS",
@@ -120,6 +121,12 @@ class CostModel:
     #: quadratic schedule applies, which is right for event contracts and
     #: wrong for anything else.
     perp_fees: PerpFeeSchedule | None = None
+    #: Rates for a Polymarket US market, when this run is trading one. Same
+    #: quadratic form as an event contract with a different coefficient -- and a
+    #: *negative* one on the maker side, so the fee this returns is signed and a
+    #: maker fill subtracts a cost that is income. FeeSchedule cannot express
+    #: that: its maker multiplier is a lookup by fee type, not a value.
+    polymarket_fees: PolymarketFeeSchedule | None = None
     latency: LatencyModel = field(default_factory=LatencyModel)
 
     #: Fraction of the size already resting at our price that we assume is
@@ -160,6 +167,13 @@ class CostModel:
         a series uses the flat schedule.
         """
         effective_taker = True if self.charge_maker_as_taker else is_taker
+        if self.polymarket_fees is not None:
+            return polymarket_fee_micros(
+                price_cc=price_cc,
+                qty_qc=qty_qc,
+                schedule=self.polymarket_fees,
+                is_taker=effective_taker,
+            )
         if self.perp_fees is not None:
             return perp_fee_micros(
                 price_cc=price_cc,
@@ -213,6 +227,15 @@ class CostModel:
             "fee_estimate_exact": self.fee_schedule.exact,
             "latency": self.latency.to_dict(),
             "queue_ahead_bps": self.queue_ahead_bps,
+            "polymarket_fees": (
+                {
+                    "taker_theta": str(self.polymarket_fees.taker_theta),
+                    "maker_theta": str(self.polymarket_fees.maker_theta),
+                    "exact": self.polymarket_fees.exact,
+                }
+                if self.polymarket_fees is not None
+                else None
+            ),
             "perp_fees": (
                 {
                     "maker_rate": str(self.perp_fees.maker_rate),

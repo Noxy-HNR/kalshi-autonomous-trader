@@ -1521,6 +1521,7 @@ class BacktestEngine:
             # itself out of every market it exists for, so the run's own perp
             # rates travel with the context rather than being re-derived.
             perp_fee_schedule=self.config.costs.perp_fees,
+            polymarket_fee_schedule=self.config.costs.polymarket_fees,
             fee_multiplier=self.config.fee_multiplier,
             # Supplied here for the same reason it is supplied live: on a delta
             # feed, silence on one market means the book has not changed, and

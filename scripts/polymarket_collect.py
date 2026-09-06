@@ -34,6 +34,7 @@ import argparse
 import asyncio
 import contextlib
 import datetime as dt
+import json
 import re
 import signal
 import sys
@@ -193,7 +194,26 @@ async def _write(conn: Any, rows: list[tuple[Any, ...]]) -> None:
         values ($1, 'event', $2, $3, $4, $5, $6, $7, $8,
                 'polymarket', $2, now(), 'ok')
         """,
-        rows,
+        [r[:8] for r in rows],
+    )
+    # The whole book, not just the touch. Banking one level made every replayed
+    # book 235 times thinner than the real one -- live books carry a median of
+    # 494,100 centi-contracts across their levels against 2,100 at the touch --
+    # and the risk engine's min_book_depth_qc of 1,000 then refused 72,467 of
+    # 101,379 intents. That read as "the venue is too thin to trade" when it was
+    # "the history is one level deep".
+    await conn.executemany(
+        """
+        insert into orderbook_snapshots
+          (ticker, market_type, ts, bids, asks, depth_levels,
+           source, source_ts, ingested_ts, quality)
+        values ($1, 'event', $2, $3, $4, $5,
+                'polymarket', $2, now(), 'ok')
+        """,
+        [
+            (r[0], r[1], json.dumps(r[8]), json.dumps(r[9]), len(r[8]))
+            for r in rows if r[8] and r[9]
+        ],
     )
 
 
@@ -298,6 +318,8 @@ async def collect(
                 bid, ask,
                 book.best_bid_size_qc, book.best_ask_size_qc,
                 last, shares,
+                [[p, book.bids[p]] for p in book.bid_prices[:10]],
+                [[p, book.asks[p]] for p in book.ask_prices[:10]],
             ))
             if len(rows) >= FLUSH_EVERY:
                 written += await _flush(db, rows)

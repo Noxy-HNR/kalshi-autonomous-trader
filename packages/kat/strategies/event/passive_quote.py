@@ -40,6 +40,7 @@ from __future__ import annotations
 from kat.common.enums import MarketType, OutcomeSide
 from kat.common.fixedpoint import CC_PER_DOLLAR, QC_PER_CONTRACT
 from kat.kalshi.fees import realised_fee_micros
+from kat.polymarket.fees import polymarket_fee_micros
 from kat.risk.types import OrderIntent
 from kat.strategies.base import StrategyContext, StrategyParam
 from kat.strategies.common import (
@@ -88,6 +89,13 @@ class PassiveQuoteStrategy(TradingStrategy):
         #                  queue *ahead* to be short, because it fills in order.
         #                  As a minimum it excluded precisely the reachable
         #                  books; the real constraint is max_queue_qc below.
+        #                  Lowered to zero after it kept rejecting half of
+        #                  Polymarket, where the median touch is one contract --
+        #                  and where a one-contract queue is the best case, not
+        #                  a disqualification. Its floor of 100 also silently
+        #                  clamped every attempt to test below it, so three
+        #                  identical runs read as evidence that depth was not
+        #                  the constraint.
         #   price band     [5c, 95c] excluded 73% of the exchange's liquid
         #                  volume, which sits under 10c. The fee is quadratic,
         #                  so it collapses at the extremes: 20cc a side at 3c
@@ -97,8 +105,10 @@ class PassiveQuoteStrategy(TradingStrategy):
             description="widest spread worth quoting; wide is good for a maker",
         ),
         StrategyParam(
-            "min_depth_qc", 100, low=100, high=100_000, step=100,
-            description="minimum resting size on BOTH sides across five levels, in centi-contracts",
+            "min_depth_qc", 0, low=0, high=100_000, step=100,
+            description="minimum resting size on BOTH sides across five levels; "
+                        "zero by default because a maker joins the book rather "
+                        "than filling against it",
         ),
         StrategyParam(
             "max_queue_qc", 5_000, low=100, high=1_000_000, step=100,
@@ -130,6 +140,23 @@ class PassiveQuoteStrategy(TradingStrategy):
     REQUIRES_BOOK = True
     MAX_DATA_AGE_MS = 5_000
 
+    def _maker_fee_cc(self, ctx: StrategyContext, mid_cc: int) -> int:
+        """What one contract's maker fill costs here, in centicents.
+
+        Signed: negative where the venue pays the maker. That falls out of the
+        spread test below correctly without a special case -- a negative
+        requirement is one any positive spread clears, which is exactly what a
+        rebate means.
+        """
+        if ctx.polymarket_fee_schedule is not None:
+            return polymarket_fee_micros(
+                price_cc=mid_cc,
+                qty_qc=QC_PER_CONTRACT,
+                schedule=ctx.polymarket_fee_schedule,
+                is_taker=False,
+            ) // 100
+        return realised_fee_micros(price_cc=mid_cc, qty_qc=QC_PER_CONTRACT) // 100
+
     def warmup_ms(self) -> int:
         """Nothing to learn: the edge is the spread, which is visible now."""
         return 0
@@ -156,7 +183,7 @@ class PassiveQuoteStrategy(TradingStrategy):
         # The spread has to pay for both fees with room to spare, or resting is
         # just a slower way of losing. The fee is quadratic in price, so this
         # bar moves with the market rather than being a constant.
-        fee_cc = realised_fee_micros(price_cc=mid_cc, qty_qc=QC_PER_CONTRACT) // 100
+        fee_cc = self._maker_fee_cc(ctx, mid_cc)
         required_cc = 2 * fee_cc * self.int_param("fee_cover_bps") // 10_000
         if quote.spread_cc < required_cc:
             return self.skip(_SKIP_SPREAD_TOO_TIGHT)

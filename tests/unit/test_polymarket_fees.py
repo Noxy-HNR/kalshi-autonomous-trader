@@ -155,3 +155,47 @@ class TestDegenerateInputs:
             assert polymarket_fee_micros(
                 price_cc=price, qty_qc=HUNDRED, schedule=EXACT, is_taker=False
             ) == 0
+
+
+class TestTheSimulatorChargesThisVenuesFee:
+    """A backtest of this venue that charges Kalshi's fee measures nothing.
+
+    The two share a formula and differ in its coefficients, so the wrong one
+    does not raise -- it silently returns a plausible number with the wrong sign
+    on the maker side, which is the only side that matters here.
+    """
+
+    def test_a_maker_fill_is_income_through_the_cost_model(self):
+        from kat.simulation.costs import CostModel
+
+        costs = CostModel(polymarket_fees=EXACT)
+        assert costs.fee_micros(price_cc=MID_CC, qty_qc=HUNDRED, is_taker=False) < 0
+
+    def test_a_taker_fill_is_still_a_cost(self):
+        from kat.simulation.costs import CostModel
+
+        costs = CostModel(polymarket_fees=EXACT)
+        assert costs.fee_micros(price_cc=MID_CC, qty_qc=HUNDRED, is_taker=True) > 0
+
+    def test_the_event_path_is_untouched_when_unset(self):
+        from kat.simulation.costs import CostModel
+
+        assert CostModel().fee_micros(
+            price_cc=5_000, qty_qc=HUNDRED, is_taker=False
+        ) > 0
+
+    def test_charging_makers_as_takers_still_overrides(self):
+        """The conservative switch must reach this path too, and on this venue
+        it does something unusual: it turns income into a cost."""
+        from kat.simulation.costs import CostModel
+
+        costs = CostModel(polymarket_fees=EXACT, charge_maker_as_taker=True)
+        assert costs.fee_micros(price_cc=MID_CC, qty_qc=HUNDRED, is_taker=False) > 0
+
+    def test_the_schedule_is_recorded_on_the_result(self):
+        from kat.simulation.costs import CostModel
+
+        assert CostModel(polymarket_fees=EXACT).to_dict()["polymarket_fees"] == {
+            "taker_theta": "0.06", "maker_theta": "-0.0125", "exact": True
+        }
+        assert CostModel().to_dict()["polymarket_fees"] is None
