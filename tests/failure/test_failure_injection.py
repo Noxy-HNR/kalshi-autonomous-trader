@@ -632,3 +632,37 @@ class TestKillSwitchFailsClosed:
         switches._loaded = True
         await switches.engage(KillSwitchScope.PERP, reason="test", actor="test")
         assert switches.is_engaged(KillSwitchScope.PERP) is True
+
+
+class TestRetryExhaustionSaysWhatFailed:
+    """An error that reports a failure and withholds every fact about it.
+
+    httpx's timeout exceptions carry an empty ``str()``, so interpolating only
+    the message produced ``GET /events failed after 4 attempts: `` -- which
+    appeared in the engine log every thirty minutes for days and could not
+    distinguish a read timeout from a 502, two problems with different fixes.
+    """
+
+    async def test_a_timeout_is_named_by_type(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ReadTimeout("")
+
+        client = make_client(handler)
+        try:
+            with pytest.raises(ExchangeError) as caught:
+                await client.get("/markets", authenticated=False)
+        finally:
+            await client.aclose()
+        assert "ReadTimeout" in str(caught.value)
+
+    async def test_a_status_failure_still_reports_its_code(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(503, json={})
+
+        client = make_client(handler)
+        try:
+            with pytest.raises(ExchangeError) as caught:
+                await client.get("/markets", authenticated=False)
+        finally:
+            await client.aclose()
+        assert "503" in str(caught.value)

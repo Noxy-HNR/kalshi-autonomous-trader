@@ -253,8 +253,15 @@ class KalshiHTTPClient:
 
             return self._decode(response, method, path)
 
+        # Named by type as well as message. httpx's timeout exceptions carry an
+        # empty str(), so interpolating only the message produced "GET /events
+        # failed after 4 attempts: " -- an error that reports a failure and
+        # withholds every fact about it. A read timeout and a 502 are different
+        # problems with different fixes, and for a while these were the same
+        # line in the log.
+        detail = f"{type(last_error).__name__}: {last_error}" if last_error else "no error recorded"
         raise ExchangeError(
-            f"{method} {path} failed after {attempt} attempts: {last_error}",
+            f"{method} {path} failed after {attempt} attempts: {detail}",
             retryable=True,
         ) from last_error
 
