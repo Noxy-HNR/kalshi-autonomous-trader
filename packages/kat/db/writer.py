@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from collections import deque
 from typing import Any
 
@@ -36,6 +37,11 @@ from kat.observability.metrics import M_DB_DROPS, M_DB_QUEUE_DEPTH, M_DB_WRITES,
 log = get_logger(__name__)
 
 __all__ = ["AsyncWriter", "get_writer", "reset_writer_singleton"]
+
+
+#: Shortest gap between attempts to restart a writer task that died. If it
+#: dies immediately every time, the restarts must not become the new flood.
+_REVIVE_INTERVAL_S = 30.0
 
 
 class _Item:
@@ -67,6 +73,8 @@ class AsyncWriter:
         # cannot wedge the writer forever.
         self._retry_batch: list[_Item] = []
         self._retry_attempts = 0
+        self._revived_at = 0.0
+        self._revivals = 0
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -110,6 +118,13 @@ class AsyncWriter:
         add a branch to the hot path for no benefit. The drop is counted and
         surfaced on the System tab instead.
         """
+        # A dead writer is the one failure this queue cannot absorb, so it is
+        # checked here -- on the only path that always runs -- rather than by a
+        # health check nobody reads. Restarting is safe: start() is idempotent
+        # on _running, which is cleared first so it takes effect.
+        if self._running and self._task is not None and self._task.done():
+            self._revive()
+
         if len(self._queue) >= self._max_size and not self._evict_one_non_critical():
                 # Everything queued is critical and the queue is full: the
                 # database has been down long enough that we are now losing
@@ -143,6 +158,30 @@ class AsyncWriter:
     # -- consumer side -------------------------------------------------------
 
     async def _run(self) -> None:
+        """Drain the queue until stopped.
+
+        Wrapped so that *any* exit is recorded. This task was created
+        fire-and-forget and nothing held a reference to it, so when it stopped
+        the engine kept running with ``_running`` still True, ``stats()`` still
+        reporting "running", and every row silently dropped once the queue
+        filled. It ran that way for sixty-six hours and lost 2,084,222 rows. A
+        CancelledError is a BaseException and slipped past the ``except
+        Exception`` inside the loop without leaving a line behind.
+        """
+        try:
+            await self._drain_forever()
+        except asyncio.CancelledError:
+            log.warning("db_writer.cancelled", queued=len(self._queue))
+            raise
+        except BaseException as exc:
+            log.critical(
+                "db_writer.died",
+                error=str(exc), error_type=type(exc).__name__,
+                queued=len(self._queue), exc_info=True,
+            )
+            raise
+
+    async def _drain_forever(self) -> None:
         while self._running:
             # A timeout simply means the flush interval elapsed with nothing
             # queued, which is the common idle case rather than an error.
@@ -155,6 +194,31 @@ class AsyncWriter:
             except Exception as exc:
                 log.error("db_writer.flush_failed", error=str(exc), exc_info=True)
                 await asyncio.sleep(min(5.0, self._flush_interval * 4))
+
+    def _revive(self) -> None:
+        """Restart a writer task that stopped without being asked to.
+
+        Rate-limited, because if it dies immediately on every attempt the
+        restarts must not become the new flood. Whatever killed it is already
+        logged by :meth:`_run`; this only ensures the next row has somewhere to
+        go.
+        """
+        now = time.monotonic()
+        if now - self._revived_at < _REVIVE_INTERVAL_S:
+            return
+        self._revived_at = now
+        self._revivals += 1
+        log.error(
+            "db_writer.reviving",
+            revivals=self._revivals, queued=len(self._queue), dropped=self._dropped,
+        )
+        self._running = False
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._running = True
+        self._task = loop.create_task(self._run(), name="db-writer")
 
     async def _take_batch(self) -> list[_Item]:
         batch: list[_Item]
@@ -321,7 +385,12 @@ class AsyncWriter:
             "capacity": self._max_size,
             "written": self._written,
             "dropped": self._dropped,
-            "running": self._running,
+            # Whether the task is actually alive, not merely whether it was
+            # asked to be. These disagreed for sixty-six hours.
+            "running": self._running and self._task is not None
+            and not self._task.done(),
+            "requested_running": self._running,
+            "revivals": self._revivals,
             "retrying": bool(self._retry_batch),
         }
 
