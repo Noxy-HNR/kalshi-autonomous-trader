@@ -216,9 +216,24 @@ class ServiceComponent:
         self.status.healthy = False
 
     async def check_health(self) -> bool:
+        """Healthy means the work is happening, not that a probe likes what it
+        sees.
+
+        A dead task is unhealthy whatever the probe returns. That is not
+        belt-and-braces: every custom probe here reports on a *proxy* for the
+        work rather than on the work itself, and each proxy survives its task.
+        The ingestors report ``ws.connected``, which stays true if the consuming
+        task dies while the socket lives; the news pipeline reports on its last
+        result, which stops changing precisely when it stops running.
+
+        This is the shape of the failure that cost the platform sixty-six hours
+        of persistence: the database writer's ``_running`` flag reported what
+        start() had been asked to do rather than whether the drain task existed,
+        and 2,084,222 rows were dropped while it said it was fine.
+        """
+        alive = self.task is None or not self.task.done()
         if self._health is None:
-            # No probe: healthy iff its task has not died.
-            ok = self.task is None or not self.task.done()
+            ok = alive
         else:
             try:
                 result = self._health()
@@ -226,6 +241,12 @@ class ServiceComponent:
             except Exception as exc:
                 ok = False
                 self.status.detail = f"health probe failed: {exc}"
+            if ok and not alive:
+                ok = False
+                self.status.detail = (
+                    "task is not running; the health probe reports on a proxy "
+                    "that outlived it"
+                )
         self.status.healthy = ok
         if ok:
             self.status.last_ok_ms = SystemClock().now_ms()
@@ -648,7 +669,33 @@ class Application:
                 )
 
     async def _health_loop(self) -> None:
-        """Periodically probe components and gate trading on the result."""
+        """Periodically probe components and gate trading on the result.
+
+        Wrapped so that its own death is recorded. This loop is what notices
+        every other component failing, so if it stops the platform loses not
+        just one component but the ability to observe any of them -- and it
+        keeps trading, because trading is gated on what this loop last decided.
+
+        Nothing supervises this task; the heartbeat it writes every thirty
+        seconds is the only external evidence it still runs. Making its exit
+        loud is the cheap half of that, and the half that would have turned the
+        database writer's sixty-six-hour silence into a single line at the top
+        of the log.
+        """
+        try:
+            await self._health_loop_forever()
+        except asyncio.CancelledError:
+            log.warning("app.health_loop_cancelled", phase=self.phase.value)
+            raise
+        except BaseException as exc:
+            log.critical(
+                "app.health_loop_died",
+                error=str(exc), error_type=type(exc).__name__,
+                phase=self.phase.value, exc_info=True,
+            )
+            raise
+
+    async def _health_loop_forever(self) -> None:
         while not self._shutdown.is_set():
             await asyncio.sleep(5.0)
             try:
