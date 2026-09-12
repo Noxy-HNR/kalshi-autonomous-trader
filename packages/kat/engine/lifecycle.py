@@ -77,6 +77,10 @@ log = get_logger(__name__)
 
 __all__ = ["Application", "ComponentHealth", "Phase", "ServiceComponent"]
 
+#: The database writer, registered as a component so that its *progress* -- not
+#: merely its existence -- is one of the conditions for trading.
+_WRITER_COMPONENT = "db-writer"
+
 #: Key under which the clean-shutdown marker is stored.
 _SHUTDOWN_MARKER = "clean_shutdown"
 
@@ -495,7 +499,42 @@ class Application:
 
         self.writer = get_writer()
         await self.writer.start()
+        self._register_writer_health()
         self.kill_switches = KillSwitchManager(self.database)
+
+    def _register_writer_health(self) -> None:
+        """Make the writer's *progress* a condition for trading.
+
+        A writer that is not draining is not a degraded convenience; it is the
+        audit trail stopping. On 2026-09-11 it committed roughly 1,500 rows an
+        hour against 70,000 produced, for most of a day, and nothing noticed:
+        health meant "the task exists" rather than "rows are landing". A
+        platform that cannot record what it is doing should not be doing more of
+        it, so this is a critical component and its failure degrades trading
+        through the same gate as everything else -- positions are still managed,
+        nothing new is opened.
+
+        Registration is guarded because ``_start_database`` has two callers: the
+        entrypoint runs it early so components are built against a live writer,
+        and :meth:`start` runs it again as part of the fixed sequence.
+        """
+        if self.writer is None or any(c.name == _WRITER_COMPONENT for c in self.components):
+            return
+        writer = self.writer
+        holder: list[ServiceComponent] = []
+
+        def probe() -> bool:
+            ok = writer.healthy()
+            # The reason, not just the verdict: "23,104 rows queued and nothing
+            # committed for 900s" is the whole diagnosis, and it belongs where
+            # the System tab and the degraded-trading log line will read it.
+            if holder:
+                holder[0].status.detail = "" if ok else writer.assess()[1]
+            return ok
+
+        component = ServiceComponent(_WRITER_COMPONENT, health=probe, critical=True)
+        holder.append(component)
+        self.register(component)
 
     async def _load_persisted_state(self) -> None:
         """Restore kill switches, mode and the shutdown marker. Runs once.

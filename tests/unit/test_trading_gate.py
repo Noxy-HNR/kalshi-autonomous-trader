@@ -141,3 +141,54 @@ class TestTradingGate:
         assert app.trading_permitted is True
         # Paper is the default; real orders must still be refused.
         assert app.can_submit_real_orders is False
+
+
+class TestAStalledWriterGatesTrading:
+    """Persistence is not a background convenience.
+
+    On 2026-09-11 the writer committed about 1,500 rows an hour against 70,000
+    produced, for most of a day, while the platform went on deciding and
+    ordering. Nothing blocked, because "healthy" meant the task existed. What
+    makes it a gate is progress: rows reaching the database.
+    """
+
+    @pytest.fixture
+    def app_with_writer(self, app):
+        from kat.db.writer import AsyncWriter
+
+        app.phase = Phase.STARTING  # components may only register before running
+        app.writer = AsyncWriter(database=object())
+        app._register_writer_health()
+        app.phase = Phase.RUNNING
+        app.kill_switches = _Switches()
+        return app
+
+    def test_the_writer_is_registered_once_and_is_critical(self, app_with_writer):
+        app_with_writer.phase = Phase.STARTING
+        app_with_writer._register_writer_health()  # the entrypoint's second call
+        app_with_writer.phase = Phase.RUNNING
+
+        writers = [c for c in app_with_writer.components if c.name == "db-writer"]
+        assert len(writers) == 1
+        assert writers[0].critical is True
+
+    async def test_a_draining_writer_is_healthy(self, app_with_writer):
+        component = app_with_writer.components[0]
+        assert await component.check_health() is True
+        assert app_with_writer.current_blocks() == []
+
+    async def test_a_backlog_going_nowhere_blocks_trading(self, app_with_writer):
+        import time
+
+        from kat.db.models import AuditLog
+
+        writer = app_with_writer.writer
+        writer.enqueue(AuditLog(actor="t", action="x", subject="s"), critical=True)
+        writer._created_at = time.monotonic() - 300  # nothing has committed since
+
+        component = app_with_writer.components[0]
+        assert await component.check_health() is False
+        assert "queued" in component.status.detail
+
+        blocks = app_with_writer.current_blocks(["db-writer"])
+        assert any("db-writer" in reason for reason in blocks)
