@@ -24,6 +24,7 @@ abandoned.
 from __future__ import annotations
 
 import subprocess
+import time
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
@@ -167,6 +168,21 @@ class TradeDecision:
         return f"{self.ticker} {self.side or ''} {verb} {price} -- {self.reason_code}".strip()
 
 
+#: How long an identical rejection is folded into a count rather than written
+#: again.
+#:
+#: A strategy that wants to trade a market it cannot trade proposes it every
+#: cycle, and every refusal was a decision row, a risk-event row and a log line.
+#: In three hours that was 19,018 ORDER_RATE_LIMIT refusals for one strategy and
+#: 7,608 for another -- about 13,000 rows an hour saying the same sentence, in
+#: which anything that happened once was invisible.
+#:
+#: Folding does not hide the refusal: the row written when the window closes
+#: carries how many times it repeated. What it removes is the repetition, and
+#: only for *rejections* -- an approval leads to an order and is always written.
+_REPEAT_WINDOW_S = 60.0
+
+
 class DecisionRecorder:
     """Builds and persists decision records.
 
@@ -188,6 +204,9 @@ class DecisionRecorder:
         self.commit = git_commit()
         self.recorded = 0
         self.rejected = 0
+        self.collapsed = 0
+        #: (strategy, ticker, side, reason) -> [window opened, repeats since]
+        self._repeats: dict[tuple[Any, ...], list[float]] = {}
 
     def build(
         self,
@@ -243,9 +262,20 @@ class DecisionRecorder:
         if not decision.approved:
             self.rejected += 1
 
+        repeats = self._fold(decision)
+        if repeats is None:
+            return decision  # identical to one just written; counted, not repeated
+
         if self.writer is not None:
             # Critical: a decision record is the audit trail, not telemetry.
-            self.writer.enqueue(decision.to_row(), critical=True)
+            row = decision.to_row()
+            if repeats:
+                # Into the JSON the row already carries, so the fact survives
+                # without a column that exists only for this.
+                checks = dict(row.risk_checks or {})
+                checks["repeats_folded"] = repeats
+                row.risk_checks = checks
+            self.writer.enqueue(row, critical=True)
 
             # A rejection is also a risk event, so the Risk tab can show what
             # fired without scanning every decision.
@@ -267,6 +297,7 @@ class DecisionRecorder:
                         detail={
                             "leverage": decision.leverage_assessment,
                             "checks": decision.risk_checks,
+                            "repeats_folded": repeats or None,
                         },
                     ),
                     critical=True,
@@ -292,8 +323,35 @@ class DecisionRecorder:
             projected_leverage=(
                 (decision.leverage_assessment or {}).get("projected_leverage")
             ),
+            repeats_folded=repeats or None,
         )
         return decision
+
+    def _fold(self, decision: TradeDecision) -> int | None:
+        """How many identical rejections preceded this one, or None to skip it.
+
+        An approval is never folded: it becomes an order, and an order needs the
+        decision that authorised it. A rejection repeated within the window is
+        counted and dropped; the first one after the window closes is written
+        and carries the count.
+        """
+        if decision.approved:
+            return 0
+        key = (decision.strategy_id, decision.ticker, decision.side, decision.reason_code)
+        now = time.monotonic()
+        seen = self._repeats.get(key)
+        if seen is not None and now - seen[0] < _REPEAT_WINDOW_S:
+            seen[1] += 1
+            self.collapsed += 1
+            return None
+        self._repeats[key] = [now, 0]
+        if len(self._repeats) > 4_000:
+            # Keys are per market and markets expire; without this the map grows
+            # with everything ever refused.
+            self._repeats = {
+                k: v for k, v in self._repeats.items() if now - v[0] < _REPEAT_WINDOW_S
+            }
+        return int(seen[1]) if seen is not None else 0
 
     def attach_execution(
         self,
@@ -323,6 +381,7 @@ class DecisionRecorder:
         return {
             "recorded": self.recorded,
             "rejected": self.rejected,
+            "collapsed": self.collapsed,
             "approval_rate": (
                 round(1 - self.rejected / self.recorded, 4) if self.recorded else None
             ),
