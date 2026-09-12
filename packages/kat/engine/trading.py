@@ -67,6 +67,19 @@ log = get_logger(__name__)
 #: minute, and rare enough that a quiet overnight run stays readable.
 _SUMMARY_INTERVAL_S = 60.0
 
+#: The smallest gap between cycles, whatever the cycle cost.
+#:
+#: A cycle that overran its interval used to sleep(0), which yields exactly
+#: once: every other task on this loop -- each of the database writer's round
+#: trips, market-data ingestion, the health loop -- then got one turn per cycle.
+#: That is how the writer came to commit about 1,500 rows an hour while 70,000
+#: were produced, and it is the same shape as a third of the watchlist reading
+#: as stale while the loop was busy.
+#:
+#: Fifty milliseconds is many database round trips on a local connection, so a
+#: batch completes in one gap, and it costs at most 5% of a one-second interval.
+_MIN_IDLE_S = 0.05
+
 __all__ = ["CycleResult", "TradingLoop"]
 
 #: Strategy states whose intents may reach a real order. PAPER and PROBATION are
@@ -146,6 +159,11 @@ class TradingLoop:
         self.order_ttl_ms = order_ttl_ms
 
         self.strategies: list[Strategy] = []
+        #: Cycle durations since the last summary, and how many of them ran
+        #: longer than the interval. An overrun is not merely a slow cycle: it
+        #: is a loop with no idle time left for anything else on it.
+        self._cycle_times: list[float] = []
+        self._overruns = 0
         #: Set by the owning application; the loop consults it every cycle.
         self.trading_permitted: bool = False
         self.operating_mode: OperatingMode = OperatingMode.GATED_DISCOVERY
@@ -258,9 +276,13 @@ class TradingLoop:
                     domain=self.market_type.value, error=str(exc), exc_info=True,
                 )
             # Pace on elapsed time so a slow cycle does not compound into a
-            # backlog of cycles all firing at once.
+            # backlog of cycles all firing at once -- but never to zero, because
+            # this loop shares its thread with everything else in the process.
             elapsed = time.monotonic() - started
-            await asyncio.sleep(max(0.0, self.interval_s - elapsed))
+            self._cycle_times.append(elapsed)
+            if elapsed > self.interval_s:
+                self._overruns += 1
+            await asyncio.sleep(max(_MIN_IDLE_S, self.interval_s - elapsed))
 
     def _log_periodic_summary(self) -> None:
         """Say, periodically, what the loop is doing and why nothing is trading.
@@ -281,6 +303,9 @@ class TradingLoop:
         self._last_summary_s = now
 
         cycle = self.last_cycle
+        times = sorted(self._cycle_times)
+        self._cycle_times = []
+        overruns, self._overruns = self._overruns, 0
         reasons: Counter[str] = Counter()
         for strategy in self.strategies:
             health = getattr(strategy, "health", None)
@@ -298,6 +323,11 @@ class TradingLoop:
             intents_generated=cycle.intents_generated if cycle else 0,
             orders_submitted=cycle.orders_submitted if cycle else 0,
             strategies_active=len(self.active_strategies()),
+            # What the loop costs, so the next time something on this thread is
+            # starved the answer is in the log rather than in a post-mortem.
+            cycle_p50_s=round(times[len(times) // 2], 3) if times else None,
+            cycle_max_s=round(times[-1], 3) if times else None,
+            cycles_over_interval=overruns,
             # The whole point of the line: the reasons, most common first.
             declined_because=dict(reasons.most_common(6)),
         )

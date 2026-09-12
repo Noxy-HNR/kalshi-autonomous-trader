@@ -176,6 +176,8 @@ M_WS_MESSAGES = "kalshi.ws.messages"
 M_WS_RECONNECTS = "kalshi.ws.reconnects"
 M_WS_SEQUENCE_GAPS = "kalshi.ws.sequence_gaps"
 M_WS_LAG_MS = "kalshi.ws.lag_ms"
+#: How late this process runs its own callbacks; see kat.observability.eventloop.
+M_LOOP_LAG_MS = "engine.loop_lag_ms"
 M_MARKET_DATA_AGE_MS = "marketdata.age_ms"
 M_DECISION_LATENCY = "engine.decision_latency_ms"
 M_RISK_LATENCY = "risk.evaluation_latency_ms"

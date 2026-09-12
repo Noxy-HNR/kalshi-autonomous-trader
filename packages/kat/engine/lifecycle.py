@@ -69,6 +69,7 @@ from kat.config.settings import AppSettings, get_settings
 from kat.db.engine import Database, get_database
 from kat.db.models import AuditLog, HealthEvent, SystemState
 from kat.db.writer import AsyncWriter, get_writer
+from kat.observability.eventloop import LoopLagMonitor
 from kat.observability.logging import get_logger
 from kat.observability.metrics import metrics
 from kat.risk.killswitch import KillSwitchManager
@@ -80,6 +81,10 @@ __all__ = ["Application", "ComponentHealth", "Phase", "ServiceComponent"]
 #: The database writer, registered as a component so that its *progress* -- not
 #: merely its existence -- is one of the conditions for trading.
 _WRITER_COMPONENT = "db-writer"
+
+#: The event-loop lag monitor. Not critical: it observes, and what gates trading
+#: is whether each component's own work is happening.
+_LOOP_MONITOR_COMPONENT = "loop-lag"
 
 #: Key under which the clean-shutdown marker is stored.
 _SHUTDOWN_MARKER = "clean_shutdown"
@@ -308,6 +313,7 @@ class Application:
         self.phase = Phase.CREATED
         self.database: Database = get_database()
         self.writer: AsyncWriter | None = None
+        self.loop_lag: LoopLagMonitor | None = None
         self.kill_switches = KillSwitchManager()
         self.components: list[ServiceComponent] = []
         self.report = StartupReport()
@@ -431,6 +437,7 @@ class Application:
                 await self._verify_configuration()
                 await self._start_database()
                 await self._load_persisted_state()
+                self._register_loop_lag_monitor()
                 await self._start_components()
                 await self._run_health_checks()
             except Exception as exc:
@@ -621,6 +628,22 @@ class Application:
                 },
                 severity="warning",
             )
+
+    def _register_loop_lag_monitor(self) -> None:
+        """Watch how late this loop runs its callbacks.
+
+        Registered here rather than by the entrypoint because it is not optional
+        wiring: it is the one number that would have named the writer's collapse
+        in a line instead of a reconstruction.
+        """
+        if any(c.name == _LOOP_MONITOR_COMPONENT for c in self.components):
+            return
+        self.loop_lag = LoopLagMonitor()
+        self.register(
+            ServiceComponent(
+                _LOOP_MONITOR_COMPONENT, run=self.loop_lag.run, critical=False
+            )
+        )
 
     async def _start_components(self) -> None:
         for component in self.components:
@@ -894,6 +917,7 @@ class Application:
                 for s in self.kill_switches.all_statuses()
             ],
             "writer": self.writer.stats() if self.writer else None,
+            "loop_lag": self.loop_lag.stats() if self.loop_lag else None,
         }
 
 
