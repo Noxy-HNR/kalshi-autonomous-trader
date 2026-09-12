@@ -38,6 +38,7 @@ import json
 import re
 import signal
 import sys
+from dataclasses import dataclass, field
 from typing import Any
 
 from kat.common.errors import ExchangeError
@@ -217,27 +218,50 @@ async def _write(conn: Any, rows: list[tuple[Any, ...]]) -> None:
     )
 
 
+@dataclass
+class FollowState:
+    """What a crash must not throw away.
+
+    The listing and the follow set used to be locals, and the supervisor
+    re-enters :func:`collect` after a crash -- so every crash discarded the
+    chosen markets and forced a fresh sweep of about 4,000 books, 25 to 30
+    minutes at the polite rate, before fine sampling resumed. Three crashes on
+    2026-09-11 cost an hour and a half of exactly the resolution the follow set
+    exists to buy.
+
+    Only a *completed* sweep fills ``quotable``, so a crash partway through one
+    still leaves nothing chosen and the next attempt starts the sweep over: a
+    ranking of the first few markets on the board is not a follow set.
+    """
+
+    markets: list[Any] = field(default_factory=list)
+    quotable: set[str] = field(default_factory=set)
+    listed_at: float = 0.0
+    #: Cumulative across attempts, so the cycle number in the log keeps counting
+    #: through a crash instead of restarting at 1 and reading like a new run.
+    cycles: int = 0
+    written: int = 0
+
+
 async def collect(
     db: _Db, rest: PolymarketREST, *, interval_s: float,
     stop: asyncio.Event, max_cycles: int | None = None,
-    follow: int = DEFAULT_FOLLOW,
+    follow: int = DEFAULT_FOLLOW, state: FollowState | None = None,
 ) -> None:
-    markets: list[Any] = []
-    quotable: set[str] = set()
-    listed_at = 0.0
+    state = FollowState() if state is None else state
     loop = asyncio.get_running_loop()
-    cycles = written = 0
+    done = 0  # cycles in *this* call, which is what max_cycles bounds
 
     while not stop.is_set():
         started = loop.time()
-        if not markets or started - listed_at > REFRESH_MARKETS_S:
+        if not state.markets or started - state.listed_at > REFRESH_MARKETS_S:
             try:
-                markets = await _open_markets(rest)
-                listed_at = started
+                state.markets = await _open_markets(rest)
+                state.listed_at = started
                 # A fresh listing invalidates what we knew about which markets
                 # carry a book, so the next pass sweeps all of them again.
-                quotable = set()
-                log.info("polymarket.markets_listed", count=len(markets))
+                state.quotable = set()
+                log.info("polymarket.markets_listed", count=len(state.markets))
             except ExchangeError as exc:
                 log.warning("polymarket.list_failed", error=str(exc))
                 await asyncio.wait([asyncio.create_task(stop.wait())], timeout=BACKOFF_S)
@@ -250,10 +274,10 @@ async def collect(
         rows: list[tuple[Any, ...]] = []
         found = 0
         gap = 1.0 / RATE_LIMIT_PER_S
-        sweeping = not quotable
+        sweeping = not state.quotable
         candidates: list[tuple[Any, int, int, int | None]] = []
-        pass_over = markets if sweeping else [
-            m for m in markets if m.slug in quotable
+        pass_over = state.markets if sweeping else [
+            m for m in state.markets if m.slug in state.quotable
         ]
         next_at = loop.time()
         for market in pass_over:
@@ -279,7 +303,7 @@ async def collect(
                     break
                 continue
             if book is None:
-                quotable.discard(market.slug)
+                state.quotable.discard(market.slug)
                 continue
             bid, ask = book.best_bid_cc, book.best_ask_cc
             # A crossed or nonsensical book is a bad read, not a trading
@@ -311,7 +335,7 @@ async def collect(
                         shares,
                     ))
             else:
-                quotable.add(market.slug)
+                state.quotable.add(market.slug)
             rows.append((
                 market.slug,
                 dt.datetime.now(dt.UTC),
@@ -322,15 +346,15 @@ async def collect(
                 [[p, book.asks[p]] for p in book.ask_prices[:10]],
             ))
             if len(rows) >= FLUSH_EVERY:
-                written += await _flush(db, rows)
+                state.written += await _flush(db, rows)
 
-        written += await _flush(db, rows)
+        state.written += await _flush(db, rows)
 
         if sweeping:
-            quotable = set(rank_tradeable(candidates, follow))
+            state.quotable = set(rank_tradeable(candidates, follow))
             log.info(
                 "polymarket.following",
-                followed=len(quotable), quotable=len(candidates),
+                followed=len(state.quotable), quotable=len(candidates),
                 ever_traded=sum(1 for c in candidates if c[3]),
                 # A budget, not a measurement: two requests per followed
                 # market -- the book for the queue, the bbo for the traded
@@ -338,22 +362,72 @@ async def collect(
                 # pass actually costs is elapsed_s on each cycle, and only that
                 # one is measured.
                 paced_seconds_per_pass=round(
-                    2 * len(quotable) / RATE_LIMIT_PER_S, 1
+                    2 * len(state.quotable) / RATE_LIMIT_PER_S, 1
                 ),
             )
 
-        cycles += 1
+        state.cycles += 1
+        done += 1
         log.info(
             "polymarket.cycle",
-            cycle=cycles, books=found, written_total=written,
+            cycle=state.cycles, books=found, written_total=state.written,
             polled=len(pass_over), sweeping=sweeping,
             elapsed_s=round(loop.time() - started, 1),
         )
-        if max_cycles is not None and cycles >= max_cycles:
+        if max_cycles is not None and done >= max_cycles:
             return
         remaining = interval_s - (loop.time() - started)
         if remaining > 0:
             await asyncio.wait([asyncio.create_task(stop.wait())], timeout=remaining)
+
+
+async def supervise(
+    db: _Db, rest: PolymarketREST, *, stop: asyncio.Event, interval_s: float,
+    max_cycles: int | None = None, follow: int = DEFAULT_FOLLOW,
+) -> int:
+    """Run the collector, re-entering it after a crash and keeping its state.
+
+    Supervise rather than exit. Twice this has run for most of a day and then
+    stopped with exit code 1 and nothing in the log, because an unhandled
+    exception's traceback goes to *stderr* -- and the scheduler discards that,
+    so fixing the log file fixed only the half of the problem that was already
+    being written down. The alternative, letting the process die and relying on
+    the task's restart policy, was tried and did not fire: the task showed Ready
+    with result 1 and stayed that way for fourteen hours while nothing collected.
+
+    The state outlives the attempt, which is the point: re-entering with a fresh
+    one is what turned each of three crashes on 2026-09-11 into half an hour of
+    re-sweeping before fine sampling resumed.
+    """
+    state = FollowState()
+    attempt = 0
+    while not stop.is_set():
+        try:
+            await collect(
+                db, rest, interval_s=interval_s, stop=stop,
+                max_cycles=max_cycles, follow=follow, state=state,
+            )
+            return 0
+        except KeyboardInterrupt:
+            stop.set()
+            return 0
+        except Exception as exc:
+            attempt += 1
+            log.exception(
+                "polymarket.collect_crashed",
+                attempt=attempt,
+                # Named in the line itself, not only in the traceback: a
+                # ConnectionResetError has an empty str(), and for months the
+                # only record of a crash was the word "crashed".
+                error=str(exc) or type(exc).__name__,
+                error_type=type(exc).__name__,
+                followed=len(state.quotable),
+            )
+            if not await db.reconnect():
+                log.error("polymarket.giving_up", reason="lock lost or db down")
+                return 1
+            await asyncio.wait([asyncio.create_task(stop.wait())], timeout=BACKOFF_S)
+    return 0
 
 
 async def main() -> int:
@@ -395,42 +469,15 @@ async def main() -> int:
         with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(sig, stop.set)
 
-    # Supervise rather than exit. Twice now this has run for most of a day and
-    # then stopped with exit code 1 and nothing in the log, because an unhandled
-    # exception's traceback goes to *stderr* -- and the scheduler discards that,
-    # so fixing the log file fixed only the half of the problem that was already
-    # being written down. Anything the loop raises is logged here, where it can
-    # be read, and then the loop is re-entered.
-    #
-    # The alternative, letting the process die and relying on the task's restart
-    # policy, was tried and did not fire: the task showed Ready with result 1 and
-    # stayed that way for fourteen hours while nothing collected.
-    attempt = 0
     try:
-        while not stop.is_set():
-            try:
-                await collect(
-                    db, rest,
-                    interval_s=args.interval_s, stop=stop,
-                    max_cycles=1 if args.once else None,
-                    follow=args.follow,
-                )
-                return 0
-            except KeyboardInterrupt:
-                stop.set()
-                return 0
-            except Exception:
-                attempt += 1
-                log.exception("polymarket.collect_crashed", attempt=attempt)
-                if not await db.reconnect():
-                    log.error("polymarket.giving_up", reason="lock lost or db down")
-                    return 1
-                await asyncio.wait(
-                    [asyncio.create_task(stop.wait())], timeout=BACKOFF_S
-                )
+        return await supervise(
+            db, rest,
+            stop=stop, interval_s=args.interval_s,
+            max_cycles=1 if args.once else None,
+            follow=args.follow,
+        )
     finally:
         await db.close()
-    return 0
 
 
 if __name__ == "__main__":

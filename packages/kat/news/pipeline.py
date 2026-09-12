@@ -277,7 +277,16 @@ class NewsPipeline:
             return await source.fetch(self._http())
         except Exception as exc:  # one dead feed must not stop the rest
             result.source_failures.append(f"{source.source_id}: {type(exc).__name__}")
-            log.warning("news.source_failed", source=source.source_id, error=str(exc))
+            # The type as a fallback, because httpx.ReadError and friends have an
+            # empty str(): this line reported a dead feed 1,841 times while
+            # withholding every fact about how it died, and a read error, a
+            # refused connection and a TLS failure are different problems.
+            log.warning(
+                "news.source_failed",
+                source=source.source_id,
+                error=str(exc) or type(exc).__name__,
+                error_type=type(exc).__name__,
+            )
             return []
 
     def _build_signal(

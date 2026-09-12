@@ -172,8 +172,22 @@ def configure_logging(
         structlog.stdlib.add_logger_name,
         structlog.processors.TimeStamper(fmt="iso", utc=True),
         _add_correlation,
-        _redact,
         structlog.processors.StackInfoRenderer(),
+        # Render the exception *here*, in the thread that caught it.
+        #
+        # ``exc_info=True`` is a request to read ``sys.exc_info()`` when the
+        # record is rendered, and the file handler renders in the listener
+        # thread, moments later, where there is no exception at all. So every
+        # traceback this platform ever logged was written as the literal
+        # ``"exc_info": true`` and nothing else -- including four collector
+        # crashes whose cause is simply not recoverable from the log.
+        #
+        # It also has to run before redaction, because it creates text that did
+        # not exist when the redactor last looked: an exception whose message
+        # quotes a signature would otherwise be the one place a signature is
+        # written down in full.
+        structlog.processors.format_exc_info,
+        _redact,
         structlog.processors.UnicodeDecoder(),
     ]
 
