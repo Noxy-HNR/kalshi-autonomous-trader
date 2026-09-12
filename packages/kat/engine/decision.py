@@ -323,7 +323,9 @@ class DecisionRecorder:
             projected_leverage=(
                 (decision.leverage_assessment or {}).get("projected_leverage")
             ),
-            repeats_folded=repeats or None,
+            # Only when there were any: a null on every line is the same noise
+            # in a smaller font.
+            **({"repeats_folded": repeats} if repeats else {}),
         )
         return decision
 
