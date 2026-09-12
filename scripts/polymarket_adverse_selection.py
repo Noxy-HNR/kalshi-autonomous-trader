@@ -34,6 +34,7 @@ import asyncio
 import bisect
 import collections
 import datetime as dt
+import pathlib
 import re
 import statistics
 from typing import Any
@@ -155,14 +156,36 @@ def _summarise(sample: list[float]) -> str:
     return f"{mean:+7.0f} +-{ci:5.0f}cc".rjust(19)
 
 
+def _write_report(path: str | None, lines: list[str]) -> None:
+    """Append this run to a file, so a series of them is a trend and not an echo."""
+    if not path:
+        return
+    stamp = dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    target = pathlib.Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("a", encoding="utf-8") as handle:
+        handle.write(f"\n===== {stamp} =====\n")
+        handle.write("\n".join(lines) + "\n")
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hours", type=int, default=48)
     parser.add_argument("--end", default=None,
                         help="ISO instant to measure back from; defaults to now. "
                              "Pin it to make a number reproducible tomorrow")
+    parser.add_argument("--report", default=None,
+                        help="append the result to this file with a timestamp, so a "
+                             "scheduled run leaves a record rather than writing to a "
+                             "console nobody is watching")
     args = parser.parse_args()
     configure_logging("WARNING")
+
+    lines: list[str] = []
+
+    def say(text: str = "") -> None:
+        print(text)
+        lines.append(text)
 
     end = dt.datetime.fromisoformat(args.end) if args.end else dt.datetime.now(dt.UTC)
     if end.tzinfo is None:
@@ -180,17 +203,18 @@ async def main() -> int:
     span_h = (rows[-1]["ts"] - rows[0]["ts"]).total_seconds() / 3600
     markets = len({r["ticker"] for r in rows})
 
-    print(f"  window   {rows[0]['ts']:%Y-%m-%d %H:%M} -> {rows[-1]['ts']:%Y-%m-%d %H:%M}Z "
-          f"({span_h:.1f}h, {len(rows):,} books, {markets:,} markets)")
+    say(f"  window   {rows[0]['ts']:%Y-%m-%d %H:%M} -> {rows[-1]['ts']:%Y-%m-%d %H:%M}Z "
+        f"({span_h:.1f}h, {len(rows):,} books, {markets:,} markets)")
     if not fills:
-        print("  no print in this window would have reached a quote at the touch")
+        say("  no print in this window would have reached a quote at the touch")
+        _write_report(args.report, lines)
         return 0
     through = sum(1 for f in fills if f["through"])
-    print(f"  ceiling  {len(fills):,} fills a continuous touch quote would have taken "
-          f"({len(fills) / span_h * 24:,.0f}/day; {through:,} traded through us)")
-    print()
-    print(f"  {'spread at fill':<16} {'n':>5}  "
-          + "  ".join(f"{m}m mark-out".rjust(19) for m in HORIZONS))
+    say(f"  ceiling  {len(fills):,} fills a continuous touch quote would have taken "
+        f"({len(fills) / span_h * 24:,.0f}/day; {through:,} traded through us)")
+    say()
+    say(f"  {'spread at fill':<16} {'n':>5}  "
+        + "  ".join(f"{m}m mark-out".rjust(19) for m in HORIZONS))
     for low, high in BUCKETS:
         bucket = [f for f in fills if low <= f["spread_cc"] < high]
         if not bucket:
@@ -199,17 +223,18 @@ async def main() -> int:
             _summarise([m for m in (_markout(series, f, h) for f in bucket) if m is not None])
             for h in HORIZONS
         ]
-        print(f"  {f'{low}-{high}cc':<16} {len(bucket):>5}  " + "  ".join(cells))
+        say(f"  {f'{low}-{high}cc':<16} {len(bucket):>5}  " + "  ".join(cells))
 
     overall = [m for m in (_markout(series, f, 5) for f in fills) if m is not None]
     if len(overall) > 1:
         positive = sum(1 for m in overall if m > 0)
-        print()
-        print(f"  all fills, 5m: {_summarise(overall).strip()} per contract, "
-              f"{positive}/{len(overall)} positive ({positive / len(overall):.0%})")
+        say()
+        say(f"  all fills, 5m: {_summarise(overall).strip()} per contract, "
+            f"{positive}/{len(overall)} positive ({positive / len(overall):.0%})")
         markets_hit = collections.Counter(f["ticker"] for f in fills)
-        print(f"  across {len(markets_hit):,} markets; busiest contributed "
-              f"{markets_hit.most_common(1)[0][1]} of {len(fills):,} fills")
+        say(f"  across {len(markets_hit):,} markets; busiest contributed "
+            f"{markets_hit.most_common(1)[0][1]} of {len(fills):,} fills")
+    _write_report(args.report, lines)
     return 0
 
 

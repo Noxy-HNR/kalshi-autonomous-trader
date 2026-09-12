@@ -62,7 +62,7 @@ back in whatever mode its configuration says.
 
 ## Polymarket collection (Windows scheduled tasks)
 
-Two tasks, both registered under the logged-in user, both verified by watching
+Three tasks, all registered under the logged-in user, all verified by watching
 the database rather than by reading the task's own status -- a task can report
 `Running` while executing a bare Python REPL, and `Ready` with result 1 for
 fourteen hours while nothing collects.
@@ -71,6 +71,38 @@ fourteen hours while nothing collects.
 | --- | --- | --- |
 | `PolymarketBookCollector` | polls the public gateway continuously | `quotes`, `orderbook_snapshots`, `logs/polymarket.log` |
 | `PolymarketBacktestDaily` | replays the banked history at 09:00 | `logs/polymarket_backtest.log` |
+| `PolymarketAdverseSelectionDaily` | measures what a resting quote is worth, by spread, at 09:05 | `logs/polymarket_adverse_selection.log` |
+
+The third is the one to read while the sample grows. It appends rather than
+overwrites, so the file is a series: the wide-spread bucket is the number that
+decides whether passive quoting here is worth anything, and a single run of it
+is 39 fills.
+
+### They only run while someone is logged in
+
+All three carry a logon trigger and an `Interactive` principal, which means a
+reboot leaves them stopped until a human signs in. That is not hypothetical: a
+Windows Update reboot at 01:29 on 2026-09-09 left nothing collecting until 18:06
+the same day -- 16.6 hours -- and the 09:00 replay of that day never ran at all.
+
+Fixing it needs one elevated shell, because changing a task's logon type
+requires it:
+
+```powershell
+$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType S4U -RunLevel Limited
+foreach ($n in 'KalshiAutonomousTrader','PolymarketBookCollector','PolymarketBacktestDaily','PolymarketAdverseSelectionDaily') {
+  $t = Get-ScheduledTask -TaskName $n
+  $triggers = @($t.Triggers)
+  if ($n -notmatch 'Daily$') { $triggers += New-ScheduledTaskTrigger -AtStartup }
+  $s = $t.Settings; $s.StartWhenAvailable = $true
+  Set-ScheduledTask -TaskName $n -Principal $principal -Trigger $triggers -Settings $s | Out-Null
+}
+```
+
+`S4U` stores no password and runs the task whether or not anyone is signed in.
+It also removes the console window these currently run in, which is worth having
+for its own sake: the engine took a `signal 2` on 2026-09-10 and exited cleanly,
+and a clean exit is exactly what the restart policy ignores -- 26.8 hours down.
 
 The collector supervises itself: it logs and re-enters its loop on any
 exception, reconnects to Postgres and re-takes its advisory lock, and holds that
