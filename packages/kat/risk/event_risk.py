@@ -34,6 +34,7 @@ from kat.kalshi.fees import estimate_fee_micros, prorate_fee_micros
 from kat.marketdata.book import OrderBook
 from kat.observability.logging import get_logger
 from kat.observability.metrics import M_RISK_REJECTIONS, metrics
+from kat.polymarket.fees import PolymarketFeeSchedule, polymarket_fee_micros
 from kat.risk.types import CheckResult, OrderIntent, RiskVerdict
 
 log = get_logger(__name__)
@@ -209,9 +210,33 @@ class EventAccountState:
 class EventRiskEngine:
     """Independent risk engine for event contracts."""
 
-    def __init__(self, settings: EventRiskSettings, *, max_state_age_ms: int = 30_000) -> None:
+    def __init__(
+        self,
+        settings: EventRiskSettings,
+        *,
+        max_state_age_ms: int = 30_000,
+        polymarket_fees: PolymarketFeeSchedule | None = None,
+    ) -> None:
         self.settings = settings
         self.max_state_age_ms = max_state_age_ms
+        #: The venue's own schedule, when this engine is judging orders for one
+        #: that is not Kalshi. Supplied by whoever builds the engine, because an
+        #: intent does not say which exchange it is bound for and this engine
+        #: must not take a strategy's word for what its costs are.
+        self.polymarket_fees = polymarket_fees
+
+    def _passive_fee_cc(self, price_cc: int) -> int:
+        """What one resting contract's fee costs here, in centicents. Signed."""
+        if self.polymarket_fees is not None:
+            return polymarket_fee_micros(
+                price_cc=price_cc,
+                qty_qc=QC_PER_CONTRACT,
+                schedule=self.polymarket_fees,
+                is_taker=False,
+            ) // 100
+        return estimate_fee_micros(
+            price_cc=price_cc, qty_qc=QC_PER_CONTRACT
+        ).fee_micros // 100
 
     def evaluate(
         self,
@@ -499,11 +524,19 @@ class EventRiskEngine:
                 # economic work, computed net of a full round trip either way.
                 floor = self.settings.min_edge_cc
                 if intent.post_only:
-                    fee = estimate_fee_micros(
-                        price_cc=intent.limit_price_cc,
-                        qty_qc=QC_PER_CONTRACT,
-                    )
-                    floor = fee.fee_micros // 100
+                    # Never below zero, whatever the venue pays. A rebate makes
+                    # this fee negative, and a negative floor would admit a
+                    # quote with no edge at all on the strength of a third of a
+                    # centicent. The floor exists to stop a trade that cannot
+                    # cover its own fee; where there is no fee to cover it stops
+                    # nothing, and min_expected_value_micros below does the
+                    # economic work.
+                    #
+                    # Charging Kalshi's fee here regardless was worth measuring:
+                    # on Polymarket it refused 47,834 intents in a day, and
+                    # every one of them was refused for a cost the venue does
+                    # not levy.
+                    floor = max(0, self._passive_fee_cc(intent.limit_price_cc))
                 ok = edge >= floor
                 checks.append(
                     CheckResult("min_edge", ok,
@@ -643,6 +676,31 @@ class EventRiskEngine:
             )
             return False, None
         checks.append(CheckResult("book_integrity", True))
+
+        if intent.post_only:
+            # The three checks below are taker guards, and every one of them
+            # inverts for an order that rests: a wide spread is what a maker is
+            # paid, depth on the far side is what a taker fills against while a
+            # maker joins the near side and waits, and slippage is the cost of
+            # crossing, which a post-only order cannot do.
+            #
+            # Leaving them did not make the platform safer, it made it
+            # contradictory. The strategy requires four cents of spread to cover
+            # adverse selection and this check refused anything above three, so
+            # between them they approved nothing at all: 34,846 intents in a day
+            # and not one order.
+            #
+            # What still bounds the loss is unchanged -- position, exposure,
+            # correlated exposure, notional and open-position limits are all
+            # above this point and all still apply.
+            checks.append(
+                CheckResult(
+                    "taker_guards_skipped", True,
+                    detail="post-only: spread, far-side depth and slippage are "
+                           "costs of crossing, and this order rests",
+                )
+            )
+            return True, None
 
         spread = book.spread_cc
         spread_ok = spread is not None and spread <= self.settings.max_spread_cc

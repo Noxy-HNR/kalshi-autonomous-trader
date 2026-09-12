@@ -1225,7 +1225,12 @@ class BacktestEngine:
 
         # The real risk engines. Not a simulator-specific variant, and not a
         # reimplementation -- the same classes the live engine constructs.
-        self.event_risk = EventRiskEngine(event_risk_settings or settings.event_risk)
+        self.event_risk = EventRiskEngine(
+            event_risk_settings or settings.event_risk,
+            # The venue being replayed, so the passive floor is priced with the
+            # fee that will actually be charged rather than Kalshi's.
+            polymarket_fees=self.config.costs.polymarket_fees,
+        )
         self.perp_risk = PerpRiskEngine(perp_risk_settings or settings.perp_risk)
 
         self.event_ledger = EventLedger(initial_capital_micros=self.config.initial_capital_micros)

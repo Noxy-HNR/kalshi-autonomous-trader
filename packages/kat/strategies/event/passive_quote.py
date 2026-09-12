@@ -45,8 +45,7 @@ from kat.risk.types import OrderIntent
 from kat.strategies.base import StrategyContext, StrategyParam
 from kat.strategies.common import (
     TradingStrategy,
-    event_costing,
-    fee_schedule_for,
+    costing_for,
 )
 from kat.strategies.proposal import (
     EV_PARAM_SPACE,
@@ -120,6 +119,11 @@ class PassiveQuoteStrategy(TradingStrategy):
             description="spread required as a multiple of two fees, in bps; 15000 is 1.5x",
         ),
         StrategyParam(
+            "min_spread_cc", 400, low=0, high=2_000, step=50,
+            description="narrowest spread worth quoting, whatever the fee says; "
+                        "this is the price of adverse selection, not of fees",
+        ),
+        StrategyParam(
             "quote_qc", 200, low=100, high=10_000, step=100,
             description="size of each resting quote, in centi-contracts",
         ),
@@ -184,7 +188,25 @@ class PassiveQuoteStrategy(TradingStrategy):
         # just a slower way of losing. The fee is quadratic in price, so this
         # bar moves with the market rather than being a constant.
         fee_cc = self._maker_fee_cc(ctx, mid_cc)
-        required_cc = 2 * fee_cc * self.int_param("fee_cover_bps") // 10_000
+        # Two requirements, and the binding one wins.
+        #
+        # The first is arithmetic: a round trip has to clear two fees. The
+        # second is what the fees never said. Measured over 201 fills a
+        # continuous touch quote would have taken on Polymarket US, the
+        # five-minute mark-out from our own fill price -- so the captured half
+        # spread is already in it -- runs -221 +- 107 centicents where the
+        # spread is under two cents and -100 +- 129 where it is under four. It
+        # turns positive, +175 +- 86, only above four cents, and that holds
+        # across 26 markets and 16 hours with no single market carrying it.
+        #
+        # A maker is paid the spread to be on the wrong side of whoever is in a
+        # hurry. Below four cents on this venue the spread does not cover that,
+        # and the fee arithmetic alone cannot see it: on a venue that pays the
+        # maker, two fees are a negative requirement that any spread clears.
+        required_cc = max(
+            2 * fee_cc * self.int_param("fee_cover_bps") // 10_000,
+            self.int_param("min_spread_cc"),
+        )
         if quote.spread_cc < required_cc:
             return self.skip(_SKIP_SPREAD_TOO_TIGHT)
 
@@ -264,12 +286,12 @@ class PassiveQuoteStrategy(TradingStrategy):
             limit_price_cc=price_cc,
             fair_value_cc=mid_cc,
             confidence=0.5,
-            costing=event_costing(
+            costing=costing_for(
+                ctx,
                 side=side,
                 cost_cc=price_cc,
                 fair_value_cc=mid_cc,
                 qty_qc=qty_qc,
-                schedule=fee_schedule_for(ctx),
                 passive=True,
             ),
             reason="passive_quote",

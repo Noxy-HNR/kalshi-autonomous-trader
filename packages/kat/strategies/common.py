@@ -53,6 +53,11 @@ from kat.kalshi.fees import (
     round_trip_fee_micros,
 )
 from kat.marketdata.book import OrderBook
+from kat.polymarket.fees import (
+    PolymarketFeeSchedule,
+    polymarket_fee_micros,
+    polymarket_round_trip_micros,
+)
 from kat.risk.types import OrderIntent
 from kat.strategies.base import Strategy, StrategyContext, StrategyMetadata, StrategyParam
 
@@ -402,6 +407,36 @@ class Costing:
         return self.net_micros > 0
 
 
+def costing_for(
+    ctx: StrategyContext,
+    *,
+    side: OutcomeSide,
+    cost_cc: int,
+    fair_value_cc: int,
+    qty_qc: int,
+    passive: bool = False,
+) -> Costing:
+    """:func:`event_costing`, priced for the venue this context is on.
+
+    Prefer this at a call site that has a context. Passing the Kalshi schedule
+    alone is how a Polymarket quote came to be charged about 175 centicents a
+    contract at fifty cents, where the venue in fact *pays* the maker a third of
+    a centicent -- against a half-spread of fifty to a hundred, which made every
+    quote on the venue look like it lost money. The expected-value gate then
+    refused 52,335 of them, and the replay filled four times in a day where the
+    flow supported two hundred.
+    """
+    return event_costing(
+        side=side,
+        cost_cc=cost_cc,
+        fair_value_cc=fair_value_cc,
+        qty_qc=qty_qc,
+        schedule=fee_schedule_for(ctx),
+        polymarket=ctx.polymarket_fee_schedule,
+        passive=passive,
+    )
+
+
 def event_costing(
     *,
     side: OutcomeSide,
@@ -409,6 +444,7 @@ def event_costing(
     fair_value_cc: int,
     qty_qc: int,
     schedule: FeeSchedule,
+    polymarket: PolymarketFeeSchedule | None = None,
     passive: bool = False,
 ) -> Costing:
     """Expected value of buying ``qty_qc`` of ``side`` at ``cost_cc``.
@@ -432,9 +468,25 @@ def event_costing(
         # costs a maker's round trip four fees where it pays two, and it is
         # enough on this venue to make an edge that clears its costs look like
         # one that does not.
-        fees_micros = estimate_fee_micros(
-            price_cc=cost_cc, qty_qc=qty_qc, schedule=schedule, is_taker=False
-        ).fee_micros
+        #
+        # Whose fee, though, is the venue's question. A signed rebate arrives
+        # negative and correctly *raises* the net; taking Kalshi's number on a
+        # venue that pays makers is the same error in the other direction.
+        if polymarket is not None:
+            fees_micros = polymarket_fee_micros(
+                price_cc=cost_cc, qty_qc=qty_qc, schedule=polymarket, is_taker=False
+            )
+        else:
+            fees_micros = estimate_fee_micros(
+                price_cc=cost_cc, qty_qc=qty_qc, schedule=schedule, is_taker=False
+            ).fee_micros
+    elif polymarket is not None:
+        fees_micros = polymarket_round_trip_micros(
+            entry_price_cc=cost_cc,
+            exit_price_cc=clamp_price_cc(value_cc),
+            qty_qc=qty_qc,
+            schedule=polymarket,
+        )
     else:
         fees_micros = round_trip_fee_micros(
             entry_price_cc=cost_cc,

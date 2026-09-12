@@ -1,7 +1,7 @@
 # What was measured, and what it cost to trade
 
-This records eleven structures tested on Kalshi across both instruments, so that
-none of them is searched twice. Every figure here came from this repository's own
+This records eleven structures tested on Kalshi across both instruments, and the
+first measurements on Polymarket US, so that none of them is searched twice. Every figure here came from this repository's own
 tooling and can be reproduced by the script named beside it.
 
 Nothing is armed. `KAT_ENVIRONMENT=paper`, `KAT_LIVE_TRADING_ARMED=false`.
@@ -205,6 +205,96 @@ which is what let strategies be backtested against history that already existed.
 There is no such shortcut here, so `scripts/polymarket_collect.py` banks books as
 they happen, into the same `quotes` table everything else reads.
 
+## Polymarket US: measured, 2026-09-12
+
+The open question above now has an answer for flow and for adverse selection.
+Both arrived with a defect attached, which is the more useful half.
+
+### The venue does trade into resting orders
+
+`scripts/polymarket_adverse_selection.py --hours 48`, over 39.6h of banked books
+(279,407 books, 5,744 markets): **277 prints would have reached a quote resting
+at the touch -- 168 a day** -- and 198 of them traded straight through it.
+
+`scripts/polymarket_flow.py` had put this at roughly twenty an hour, which is
+about 2x too generous: it divides an interval's traded volume by *one* side's
+queue, and the counter this venue publishes is two-sided. The correction is the
+same shape as the Kalshi survey's, which measured volume and queue separately
+and never divided one by the other.
+
+### The platform was not there for almost any of it
+
+Per-print accounting through the replay of 2026-09-11, 183 prints:
+
+| why a print did not fill us | count |
+| --- | --- |
+| no order of ours was resting in that market | 178 |
+| resting, but on the wrong side or at the wrong price | 3 |
+| reachable, but the queue ahead outlasted the print | 1 |
+| filled | 1 |
+
+Neither queue position nor adverse selection. Three gates were pricing this
+venue with Kalshi's fee schedule:
+
+| gate | what it assumed | what the venue does |
+| --- | --- | --- |
+| `event_costing(passive=True)`, which sets the intent's expected value | ~175cc a contract at 50c | pays **-0.3cc**, a rebate |
+| the risk engine's passive edge floor | the same fee | the same rebate |
+| the risk engine's market-quality check | spread <= 300cc, or it is too wide to trade | a wide spread is the maker's entire product |
+
+Against a half-spread of 50-100cc a fictitious 175cc fee makes every quote on the
+venue look like a loss, and the expected-value gate then refuses it -- 47,834
+refusals in a day, each for a cost that does not exist. Opening only the fee
+floor changes nothing, because the same intents are refused one gate lower.
+Opening only the spread requirement is worse than nothing: the strategy then
+demands four cents and the risk engine refuses anything above three, so between
+them they approved **zero** orders out of 34,846 intents.
+
+### Adverse selection is real here, and it is a function of the spread
+
+Mark-out measured from our own fill price, so the half-spread we captured is
+already inside it. Positive means the quote was worth placing.
+
+| spread at fill | n | 1m | 5m | 30m |
+| --- | --- | --- | --- | --- |
+| 100-200cc | 148 | -319 +- 106 | -300 +- 104 | -292 +- 109 |
+| 200-400cc | 83 | -201 +- 122 | -151 +- 111 | -142 +- 148 |
+| **400-1000cc** | 35 | **+155 +- 78** | **+167 +- 76** | +100 +- 163 |
+| 1000cc+ | 11 | +758 +- 694 | +454 +- 620 | +376 +- 592 |
+
+Below four cents the spread does not pay for being on the wrong side of whoever
+is in a hurry. Above it, on this sample, it does: 30 of 36 such fills are
+positive, across 26 markets and 16 hours, and leaving out any single market
+moves the mean between +189 and +212cc.
+
+This is why `min_spread_cc` is a strategy parameter of 400 rather than a fee
+calculation. The fee arithmetic cannot see adverse selection at all, and on a
+venue that pays the maker it produces a negative requirement that any spread
+clears. Until it was measured, Kalshi's wrong fee had been doing this job by
+accident -- demanding a wide spread for the wrong reason.
+
+### What the corrected configuration does
+
+Replaying 39.5h with the venue priced correctly, the four-cent floor in place and
+the taker guards off a post-only order: **21 fills (13 a day), +0.1526% on the
+window, mark-out +162 +- 70cc at five minutes.**
+
+Positive, and twenty-one fills is not proof of anything.
+
+### What is still unmeasured
+
+A mark-out at the mid is not realised profit. Capturing it needs an exit, and
+crossing a four-cent spread to take one costs more than the 167cc it is worth --
+so the exit has to be passive as well, or the position has to be held to
+settlement. Neither is measured yet, and that question decides whether any of
+this is money.
+
+The polling interval is the other limit: the collector sees a book about every
+thirty seconds, so a move that went and came back is invisible, and the fastest
+adverse moves are the ones that hurt most. That bias runs one way. These numbers
+understate adverse selection, so the negative rows above are conclusive and the
+positive ones are provisional.
+
 ## What would change the answer
 
 1. **Real perpetual book depth.** Every perp result rests on candle summaries —
@@ -232,6 +322,15 @@ they happen, into the same `quotes` table everything else reads.
 .venv/Scripts/python.exe scripts/perp_basis_check.py
 .venv/Scripts/python.exe scripts/perp_backtest.py --hours 336 --cache train.pkl
 .venv/Scripts/python.exe scripts/perp_direction.py train.pkl test.pkl
+.venv/Scripts/python.exe scripts/polymarket_adverse_selection.py --hours 48
+.venv/Scripts/python.exe scripts/polymarket_backtest.py --hours 36 --report logs/polymarket_backtest.log
+```
+
+The Polymarket numbers move as the collector banks more, so pin the window with
+`--end` when a figure has to be re-derived exactly:
+
+```bash
+.venv/Scripts/python.exe scripts/polymarket_adverse_selection.py --hours 48 --end 2026-09-12T19:10:00Z
 ```
 
 `scripts/backfill_settled.py` banks settled-market history from Kalshi's
