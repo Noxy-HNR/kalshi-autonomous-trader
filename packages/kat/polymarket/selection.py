@@ -80,8 +80,26 @@ def rank_by_reachability(
     return [slug for _, slug in scored[:limit]]
 
 
+#: The narrowest edge worth spending fine resolution on, in centicents.
+#:
+#: Measured over 277 fills a continuous touch quote would have taken here: the
+#: five-minute mark-out from our own fill price runs -300 +- 104cc where the
+#: spread is under two cents and -151 +- 111 under four, turning positive at
+#: +167 +- 76 only above it. A market under four cents is one the strategy
+#: refuses to quote, so following it closely spends two requests a pass on data
+#: nothing will ever act on.
+#:
+#: This is ``PassiveQuoteStrategy``'s ``min_spread_cc`` -- the same number for
+#: the same reason -- and the two have to move together. They are not wired to
+#: each other on purpose: a data collector that imported a strategy's parameters
+#: would collect only what today's strategy wants, and the sweep that feeds every
+#: other measurement here is the thing that would quietly narrow.
+MIN_FOLLOW_EDGE_CC = 400
+
+
 def rank_tradeable(
-    candidates: list[tuple[Any, int, int, int | None]], limit: int
+    candidates: list[tuple[Any, int, int, int | None]], limit: int,
+    *, min_edge_cc: int = 0,
 ) -> list[str]:
     """Rank on reachability, but only among markets that actually trade.
 
@@ -104,10 +122,20 @@ def rank_tradeable(
     worthless behind a deep queue and a short queue is worthless without flow,
     and only markets with both are worth a slot.
     """
-    scored = [
-        (edge / max(queue, QC_PER_CONTRACT), market.slug)
+    tradeable = [
+        (edge / max(queue, QC_PER_CONTRACT), edge, market.slug)
         for market, edge, queue, traded in candidates
         if edge > 0 and traded
     ]
-    scored.sort(key=lambda pair: (-pair[0], pair[1]))
-    return [slug for _, slug in scored[:limit]]
+    # Quotable first, then the rest, each by reachability. Two tiers rather than
+    # a filter: a floor on its own would shrink the follow set on a quiet board
+    # and leave slots unspent, and an unfilled slot collects nothing at all.
+    preferred = sorted(
+        (pair for pair in tradeable if pair[1] >= min_edge_cc),
+        key=lambda pair: (-pair[0], pair[2]),
+    )
+    rest = sorted(
+        (pair for pair in tradeable if pair[1] < min_edge_cc),
+        key=lambda pair: (-pair[0], pair[2]),
+    )
+    return [slug for _, _, slug in (preferred + rest)[:limit]]

@@ -46,7 +46,7 @@ from kat.common.fixedpoint import CC_PER_DOLLAR
 from kat.config.settings import AppSettings
 from kat.observability.logging import configure_logging, get_logger
 from kat.polymarket.rest import PolymarketREST
-from kat.polymarket.selection import maker_edge_cc, rank_tradeable
+from kat.polymarket.selection import MIN_FOLLOW_EDGE_CC, maker_edge_cc, rank_tradeable
 
 log = get_logger(__name__)
 
@@ -351,7 +351,9 @@ async def collect(
         state.written += await _flush(db, rows)
 
         if sweeping:
-            state.quotable = set(rank_tradeable(candidates, follow))
+            state.quotable = set(
+                rank_tradeable(candidates, follow, min_edge_cc=MIN_FOLLOW_EDGE_CC)
+            )
             log.info(
                 "polymarket.following",
                 followed=len(state.quotable), quotable=len(candidates),

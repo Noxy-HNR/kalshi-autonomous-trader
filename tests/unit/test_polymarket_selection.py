@@ -140,3 +140,69 @@ class TestOnlyMarketsThatTradeAreFollowed:
         from kat.polymarket.selection import rank_tradeable
 
         assert rank_tradeable([(_Market("loses"), -5, 100, 9_999)], 5) == []
+
+
+class TestTheFollowSetPrefersWhatCanBeQuoted:
+    """Fine resolution is a budget, and spending it on markets the strategy
+    refuses collects data nothing will act on.
+
+    Measured here, a resting quote's five-minute mark-out is -300 +- 104cc under
+    two cents of spread and +167 +- 76 above four. So a four-cent market is
+    worth two requests a pass and a one-cent market is not -- but a floor alone
+    would leave slots unspent on a quiet board, and an unfilled slot collects
+    nothing at all.
+    """
+
+    def _candidates(self, *specs):
+        from types import SimpleNamespace
+
+        return [
+            (SimpleNamespace(slug=slug), edge, queue, traded)
+            for slug, edge, queue, traded in specs
+        ]
+
+    def test_a_quotable_market_outranks_a_more_reachable_tight_one(self):
+        from kat.polymarket.selection import MIN_FOLLOW_EDGE_CC, rank_tradeable
+
+        # The tight market is far more reachable -- and worth nothing to quote.
+        chosen = rank_tradeable(
+            self._candidates(
+                ("tight", 100, 100, 5_000),   # reachability 1.00
+                ("wide", 500, 5_000, 5_000),  # reachability 0.10
+            ),
+            limit=2,
+            min_edge_cc=MIN_FOLLOW_EDGE_CC,
+        )
+        assert chosen == ["wide", "tight"]
+
+    def test_spare_slots_still_go_to_the_rest(self):
+        from kat.polymarket.selection import rank_tradeable
+
+        chosen = rank_tradeable(
+            self._candidates(
+                ("wide", 500, 100, 5_000),
+                ("tight_a", 100, 100, 5_000),
+                ("tight_b", 90, 100, 5_000),
+            ),
+            limit=3,
+            min_edge_cc=400,
+        )
+        assert chosen[0] == "wide"
+        assert set(chosen) == {"wide", "tight_a", "tight_b"}
+
+    def test_a_market_that_never_traded_is_still_refused(self):
+        """The floor narrows what is preferred; it does not admit anything new."""
+        from kat.polymarket.selection import rank_tradeable
+
+        assert rank_tradeable(
+            self._candidates(("wide_but_dead", 900, 100, None)),
+            limit=5, min_edge_cc=400,
+        ) == []
+
+    def test_the_default_is_the_old_behaviour(self):
+        from kat.polymarket.selection import rank_tradeable
+
+        chosen = rank_tradeable(
+            self._candidates(("a", 100, 100, 1), ("b", 500, 5_000, 1)), limit=2
+        )
+        assert chosen == ["a", "b"]
