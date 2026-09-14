@@ -580,6 +580,15 @@ class TradingLoop:
                     strategy.on_fill(
                         intent.ticker, order.filled_qty_qc, order.avg_fill_price_cc or 0
                     )
+                note_exit = getattr(self.account_state, "note_exit", None)
+                if intent.reduce_only and note_exit is not None:
+                    # Recorded here, where paper and live both know the exit filled,
+                    # rather than in apply_fill, which only paper runs. The risk
+                    # engine reads it to refuse an entry straight back in.
+                    cooldown_s = getattr(
+                        getattr(self.risk_engine, "settings", None), "reentry_cooldown_s", 1_800
+                    )
+                    note_exit(intent.ticker, now_ms, keep_ms=int(cooldown_s) * 1000)
 
     def _mark_positions(self) -> None:
         """Value open positions at the current market, in paper.

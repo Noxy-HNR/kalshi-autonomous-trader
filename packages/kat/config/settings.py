@@ -264,6 +264,21 @@ class EventRiskSettings(BaseSettings):
     max_open_positions: int = Field(default=20, ge=1, le=500)
     max_orders_per_minute: int = Field(default=30, ge=1, le=600)
     max_order_notional_usd: Decimal = Field(default=Decimal("25.00"))
+    #: How long after an exit a market refuses new entries.
+    #:
+    #: Two strategies can hold opposite views of one market, and each can be
+    #: right by its own lights. On 2026-09-14 news_reaction bought YES at 83
+    #: cents every cycle and model_drift, whose forecast said the opposite, sold
+    #: it back at 81 in the same cycle: 31 exits and 30 re-entries in two minutes
+    #: across two markets, -$3.51, about $84 an hour, every round trip paying the
+    #: spread. Neither strategy is wrong alone; the loss is in the pair, so the
+    #: refusal belongs here, above both of them.
+    #:
+    #: Thirty minutes because that is the horizon of the forecast doing the
+    #: exiting. Once it has passed, the view that closed the position has expired
+    #: and re-entering is a new question rather than the same fight. The floor is
+    #: the default: this can only be made longer.
+    reentry_cooldown_s: int = Field(default=1_800, ge=1_800, le=86_400)
 
     # Quality gates: an order is not placed unless the market is tradeable.
     max_spread_cc: int = Field(default=300, ge=1, le=5_000)  # $0.03 default

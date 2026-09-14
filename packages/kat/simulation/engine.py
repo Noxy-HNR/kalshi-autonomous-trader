@@ -680,8 +680,22 @@ class EventLedger:
         self.peak_equity_micros = initial_capital_micros
         self._realized_today_micros = 0
         self._today: str = ""
+        #: Markets exited and when, kept the way the live account keeps them, so
+        #: the re-entry cooldown refuses in a backtest exactly what it refuses in
+        #: the engine. A backtest looser than the platform it stands for measures
+        #: trades that platform would never make.
+        self.recent_exits_ms: dict[str, int] = {}
 
     # -- fills ---------------------------------------------------------------
+
+    def note_exit(self, ticker: str, now_ms: int, *, keep_ms: int) -> None:
+        """Record an exit, as the live account records one."""
+        self.recent_exits_ms[ticker] = now_ms
+        if len(self.recent_exits_ms) > 256:
+            horizon = now_ms - keep_ms
+            self.recent_exits_ms = {
+                t: at for t, at in self.recent_exits_ms.items() if at >= horizon
+            }
 
     def apply_fill(self, fill: SimFill, *, event_ticker: str = "") -> None:
         pos = self.positions.get(fill.ticker)
@@ -852,6 +866,7 @@ class EventLedger:
             realized_pnl_today_micros=self._realized_today_micros,
             orders_this_minute=orders_this_minute,
         )
+        state.recent_exits_ms = self.recent_exits_ms
         for pos in self.positions.values():
             snap = market.get(pos.ticker)
             value = self.position_value_micros(pos, snap)
@@ -1391,6 +1406,12 @@ class BacktestEngine:
             self.event_ledger.apply_fill(
                 fill, event_ticker=self._event_tickers.get(fill.ticker, "")
             )
+            order = self.fills.orders.get(fill.order_id)
+            if order is not None and order.reduce_only:
+                self.event_ledger.note_exit(
+                    fill.ticker, fill.ts_ms,
+                    keep_ms=self.event_risk.settings.reentry_cooldown_s * 1000,
+                )
         else:
             self.perp_ledger.apply_fill(fill)
         for strategy in self.strategies:

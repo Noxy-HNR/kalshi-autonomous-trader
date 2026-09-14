@@ -81,10 +81,31 @@ class EventAccountState:
     realized_pnl_today_micros: int = 0
     peak_equity_micros: int = 0
     orders_this_minute: int = 0
+    #: When each market was last exited, so an entry straight back in can be
+    #: refused. Pruned as it is written: a dict keyed by market that only grows is
+    #: exactly what took the trading cycle to 3.6 seconds days before this existed.
+    recent_exits_ms: dict[str, int] = field(default_factory=dict)
 
     @property
     def equity_micros(self) -> int:
         return self.balance_micros + self.portfolio_value_micros
+
+    def note_exit(self, ticker: str, now_ms: int, *, keep_ms: int) -> None:
+        """Record that a position in ``ticker`` was just exited."""
+        self.recent_exits_ms[ticker] = now_ms
+        if len(self.recent_exits_ms) > 256:
+            horizon = now_ms - keep_ms
+            self.recent_exits_ms = {
+                t: at for t, at in self.recent_exits_ms.items() if at >= horizon
+            }
+
+    def exited_within(self, ticker: str, now_ms: int, window_ms: int) -> int | None:
+        """Milliseconds since ``ticker`` was exited, when that is inside the window."""
+        at = self.recent_exits_ms.get(ticker)
+        if at is None:
+            return None
+        elapsed = now_ms - at
+        return elapsed if 0 <= elapsed < window_ms else None
 
 
     def apply_fill(
@@ -332,6 +353,34 @@ class EventRiskEngine:
                 return self._rejected(
                     intent, "ORDER_RATE_LIMIT",
                     "order rate limit reached; runaway-order protection engaged",
+                    checks,
+                )
+
+            # An entry straight back into a market that was just exited.
+            #
+            # Not a strategy's bug and not caught by any strategy: two of them held
+            # opposite views of one market, one bought every cycle and the other
+            # sold it back in the same cycle, and the pair paid the spread once a
+            # second -- 31 round trips in two minutes, -$3.51. Exits are processed
+            # before entries within a cycle, so the entry that would have reopened
+            # the position is refused here in the same cycle as the exit.
+            cooldown_ms = self.settings.reentry_cooldown_s * 1000
+            since_exit_ms = state.exited_within(intent.ticker, now_ms, cooldown_ms)
+            cooled = since_exit_ms is None
+            checks.append(
+                CheckResult(
+                    "reentry_cooldown", cooled,
+                    limit=f"{self.settings.reentry_cooldown_s}s",
+                    observed=(
+                        "no recent exit" if since_exit_ms is None
+                        else f"{since_exit_ms // 1000}s since exit"
+                    ),
+                )
+            )
+            if not cooled:
+                return self._rejected(
+                    intent, "REENTRY_COOLDOWN",
+                    "this market was just exited; entries wait out the cooldown",
                     checks,
                 )
 

@@ -375,6 +375,20 @@ RISK_FIELDS: list[dict[str, str]] = [
         ),
     },
     {
+        "anchor": "field-reentry_cooldown_s",
+        "field": "reentry_cooldown_s",
+        "term": "Re-entry cooldown",
+        "short": "How long a market stays closed to new trades after one is exited.",
+        "body": (
+            "Two strategies can disagree about the same market. If one keeps buying "
+            "and the other keeps selling it back, each is doing its job and the "
+            "account pays the spread every time -- once a second, in the case that "
+            "led to this.\n\n"
+            "After a position is exited, new entries in that market wait this long. "
+            "Exits are never held back, so a position can always be closed."
+        ),
+    },
+    {
         "anchor": "field-min_liquidation_buffer_pct",
         "field": "min_liquidation_buffer_pct",
         "term": "Minimum liquidation buffer",
