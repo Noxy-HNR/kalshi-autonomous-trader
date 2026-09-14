@@ -29,9 +29,12 @@ tickers had resolved and carried a result; they were simply never looked up.
 from __future__ import annotations
 
 import asyncio
+import bisect
+from datetime import datetime, timedelta
 
 from sqlalchemy import select
 
+from kat.common.timeutil import utcnow_aware
 from kat.db.engine import Database
 from kat.db.models import Settlement as SettlementRow
 from kat.db.writer import AsyncWriter
@@ -46,6 +49,25 @@ __all__ = ["SettlementRecorder"]
 #: an empty string, "void", a status we have not seen -- is not an outcome and
 #: must not be labelled as one. A voided market did not resolve NO.
 _OUTCOMES: dict[str, float] = {"yes": 1.0, "no": 0.0}
+
+#: How far back each pass re-reads quotes for markets it has not yet seen.
+#:
+#: Asking for every distinct ticker in the quotes table, every fifteen minutes,
+#: costs more each time the table grows, and the table only grows. Reading since
+#: the previous pass is enough; the overlap covers rows written late, stamped with
+#: the time they were observed rather than the time they landed.
+_OBSERVED_OVERLAP = timedelta(hours=1)
+
+#: Passes between full rescans of the quotes table.
+#:
+#: The incremental read filters on when a quote was observed, because that column
+#: is indexed and the table is the largest in the schema. Measured over 48 hours
+#: the worst gap between a quote's observation and its row landing was 2 minutes
+#: 40 seconds, well inside the overlap -- but a stalled database writer holds rows
+#: for as long as it is stalled, and a quote that lands after its window has
+#: passed would never be read. A full rescan once a day at the default fifteen
+#: minute interval bounds that miss to a day instead of forever.
+_FULL_RESCAN_EVERY = 96
 
 
 class SettlementRecorder:
@@ -75,6 +97,12 @@ class SettlementRecorder:
         #: Tickers resolved or known unresolved, so repeated passes do not ask
         #: the same questions. Unresolved ones are retried on the next pass.
         self._settled: set[str] = set()
+        #: Every market ever quoted, built up pass by pass rather than re-read.
+        self._observed: set[str] = set()
+        self._observed_since: datetime | None = None
+        self._scans = 0
+        #: Where the last pass stopped, so the next one carries on from there.
+        self._after: str | None = None
         self.polls = 0
         self.written = 0
         self.unresolved = 0
@@ -85,14 +113,19 @@ class SettlementRecorder:
             return []
         from kat.db.models import Quote
 
+        started = utcnow_aware()
+        query = select(Quote.ticker).distinct()
+        full = self._observed_since is None or self._scans % _FULL_RESCAN_EVERY == 0
+        self._scans += 1
+        if not full:
+            query = query.where(Quote.ts > self._observed_since)
         async with self.database.session() as session:
-            observed = {
-                t for (t,) in await session.execute(select(Quote.ticker).distinct())
-            }
+            self._observed.update(t for (t,) in await session.execute(query))
             known = {
                 t for (t,) in await session.execute(select(SettlementRow.ticker).distinct())
             }
-        return sorted(observed - known - self._settled)
+        self._observed_since = started - _OBSERVED_OVERLAP
+        return sorted(self._observed - known - self._settled)
 
     async def poll_once(self) -> int:
         """One pass over a batch of unresolved markets. Returns rows written."""
@@ -103,7 +136,19 @@ class SettlementRecorder:
         self.polls += 1
         written = 0
         looked_up = 0
-        for ticker in pending[: self.batch]:
+        # Carry on from where the last pass stopped, wrapping at the end.
+        #
+        # Every pass used to take the same alphabetical head of the backlog. A
+        # market still open is retried, not settled, so once the first 120 were
+        # long-dated every pass asked about those 120 and nothing after them was
+        # ever reached -- reproduced as 11,520 lookups of 120 markets in a day
+        # and 500 resolved markets never asked about, and seen live as a
+        # still_pending count that only rose.
+        start = bisect.bisect_right(pending, self._after) if self._after is not None else 0
+        window = pending[start : start + self.batch]
+        if len(window) < self.batch and start > 0:
+            window += pending[: min(start, self.batch - len(window))]
+        for ticker in window:
             looked_up += 1
             try:
                 market = await self.rest.get_market(ticker)
@@ -136,13 +181,17 @@ class SettlementRecorder:
             )
             written += 1
 
+        if window:
+            self._after = window[-1]
         self.written += written
         log.info(
             "settlements.recorded",
             new=written,
             total=self.written,
             looked_up=looked_up,
-            still_pending=max(0, len(pending) - looked_up),
+            # Markets still without a recorded outcome after this pass -- not the
+            # ones this pass happened not to reach, which is what this used to say.
+            still_pending=max(0, len(pending) - written),
         )
         return written
 

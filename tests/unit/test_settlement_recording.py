@@ -105,3 +105,30 @@ class TestOutcomesAreRecorded:
         rec = _recorder({}, [])
         assert await rec.poll_once() == 0
         assert rec.rest.asked == []
+
+
+class TestTheBacklogIsWalkedNotItsHead:
+    """Every pass used to take the same alphabetical head of the backlog.
+
+    A market still open is retried rather than settled, so once the first batch
+    were long-dated, every pass asked about those and nothing after them was ever
+    reached: review reproduced 11,520 lookups of 120 markets in a day with 500
+    resolved markets never asked about, and live the still_pending count only rose.
+    """
+
+    async def test_resolved_markets_behind_an_open_head_are_reached(self):
+        still_open = {f"A{i:03d}": "" for i in range(4)}
+        resolved = {f"B{i:03d}": "yes" for i in range(6)}
+        rec = _recorder({**still_open, **resolved}, sorted(still_open) + sorted(resolved), batch=4)
+
+        for _ in range(3):
+            await rec.poll_once()
+
+        assert rec._settled == set(resolved)
+
+    async def test_the_walk_wraps_back_to_the_start(self):
+        rec = _recorder(dict.fromkeys("ABCDE", ""), list("ABCDE"), batch=2)
+        for _ in range(3):
+            await rec.poll_once()
+
+        assert rec.rest.asked == ["A", "B", "C", "D", "E", "A"]
