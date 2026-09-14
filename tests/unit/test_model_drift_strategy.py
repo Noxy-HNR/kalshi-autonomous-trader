@@ -207,3 +207,58 @@ class TestTheEdgeMustCoverWhatCapturingItCosts:
         # A market so cheap to trade that cost < min_edge_cc; min_edge still binds.
         cheap = ModelDriftStrategy._round_trip_cc(9_900, 10)
         assert cheap < s.int_param("min_edge_cc")
+
+
+class TestOneExitAtATime:
+    """An exit that rests unfilled must not be proposed again on top of itself --
+    and must not be held back by anybody else's orders.
+
+    Nothing looked at what was already working, so each cycle placed another:
+    103,680 reduce-only orders against four markets in 20.5 hours. The first fix
+    read the market-wide working quantity, and review reproduced through the real
+    cycle that another strategy's staggered orders then held a fillable exit back
+    for 540 cycles. What counts is this strategy's own working exit.
+    """
+
+    def _holding(self, *, position_qc: int = 100, own_exit_qc: int = 0,
+                 market_resting_qc: int = 0) -> StrategyContext:
+        ctx = _ctx(probability=0.9, target="forward_move_30m_200cc")
+        ctx.position_qc = position_qc
+        ctx.position_age_ms = 31 * 60_000  # past the model's thirty-minute horizon
+        ctx.resting_exit_qty_qc = own_exit_qc
+        ctx.resting_qty_qc = market_resting_qc
+        return ctx
+
+    def test_an_expired_position_is_exited_when_nothing_is_working(self):
+        s = ModelDriftStrategy()
+        intents = s.generate(self._holding())
+
+        assert len(intents) == 1
+        assert intents[0].reduce_only is True
+        assert intents[0].qty_qc == 100
+
+    def test_no_second_exit_while_its_own_covers_the_position(self):
+        s = ModelDriftStrategy()
+        assert s.generate(self._holding(own_exit_qc=100)) == []
+        assert _skip(s) == "exit_already_working"
+
+    def test_another_strategys_orders_do_not_hold_the_exit_back(self):
+        """The case review reproduced: the market is busy, this strategy's exit is not."""
+        s = ModelDriftStrategy()
+        intents = s.generate(self._holding(market_resting_qc=5_000))
+
+        assert len(intents) == 1
+        assert intents[0].reduce_only is True
+
+    def test_only_the_part_its_own_exit_does_not_cover_is_exited(self):
+        s = ModelDriftStrategy()
+        intents = s.generate(self._holding(position_qc=500, own_exit_qc=200))
+
+        assert len(intents) == 1
+        assert intents[0].qty_qc == 300
+
+    def test_waiting_for_its_exit_does_not_open_anything_instead(self):
+        """Declining the duplicate must not fall through to the entry path."""
+        s = ModelDriftStrategy()
+        assert s.generate(self._holding(own_exit_qc=100)) == []
+        assert s.health().get("intents", 0) == 0

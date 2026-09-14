@@ -26,8 +26,9 @@ import asyncio
 from abc import ABC, abstractmethod
 from typing import Any
 
-from kat.common.enums import MarketType, OrderState, TradingEnvironment
+from kat.common.enums import MarketType, OrderState, OutcomeSide, TradingEnvironment
 from kat.common.errors import RiskRejection
+from kat.common.fixedpoint import CC_PER_DOLLAR
 from kat.common.ids import use_correlation_id
 from kat.common.timeutil import Clock
 from kat.db.models import Fill as FillRow
@@ -51,6 +52,23 @@ from kat.risk.types import RiskVerdict
 log = get_logger(__name__)
 
 __all__ = ["ExecutionEngine"]
+
+#: The window ``orders_in_last_minute`` counts over. Named because pruning must
+#: never shorten it: an order forgotten inside this window is an order the
+#: runaway-order limit can no longer see, which quietly loosens a risk check.
+_RATE_WINDOW_MS = 60_000
+
+#: How long a finished order stays in memory after it finishes.
+#:
+#: Every order used to stay forever, and the scans over this dict run every
+#: trading cycle. On 2026-09-13 it held 103,455 orders, 103,423 of them
+#: cancelled, and the cycle had grown from 23ms to 3.6 seconds over twenty
+#: hours -- starving the database writer and flapping trading in and out of
+#: DEGRADED 189 times. The same growth was behind the 1.7-second cycles of
+#: 2026-09-11. A finished order is already in the database; memory only needs
+#: it for the rate window, and for an exchange message that arrives after we
+#: believed the order was done. Ten minutes covers both with room to spare.
+_TERMINAL_RETENTION_MS = 10 * 60_000
 
 
 class ExecutionEngine(ABC):
@@ -85,6 +103,9 @@ class ExecutionEngine(ABC):
         self.orders: dict[str, ManagedOrder] = {}
         self._by_client_id: dict[str, ManagedOrder] = {}
         self._lock = asyncio.Lock()
+        #: Finished orders forgotten so far, so the stats say memory is bounded
+        #: rather than leaving it to be inferred from a small number.
+        self._pruned = 0
 
     # -- public API ----------------------------------------------------------
 
@@ -230,6 +251,40 @@ class ExecutionEngine(ABC):
             if o.is_working and (ticker is None or o.ticker == ticker)
         ]
 
+    def prune_terminal_orders(self, *, now_ms: int) -> int:
+        """Forget orders that finished longer ago than the retention period.
+
+        Only terminal orders are candidates. Anything that can still consume
+        exposure stays however old it is -- including ``UNKNOWN``, which
+        reconciliation has yet to resolve, and ``CANCEL_REQUESTED``, which the
+        exchange may still fill.
+
+        Two guards keep this from loosening anything. Retention is never shorter
+        than the rate window, and an order submitted inside the window is kept
+        even if its timestamps say otherwise, so every order
+        ``orders_in_last_minute`` could count is still here to be counted. And an
+        order marked terminal without a ``terminal_ts`` is kept: when it finished
+        is unknown, and an unknown age is not an old one.
+        """
+        horizon = now_ms - max(_TERMINAL_RETENTION_MS, _RATE_WINDOW_MS)
+        rate_floor = now_ms - _RATE_WINDOW_MS
+        finished: list[str] = []
+        for order_id, order in self.orders.items():
+            if not order.state.is_terminal or order.terminal_ts is None:
+                continue
+            if order.terminal_ts.timestamp() * 1000.0 >= horizon:
+                continue
+            submitted = order.submitted_ts
+            if submitted is not None and submitted.timestamp() * 1000.0 >= rate_floor:
+                continue
+            finished.append(order_id)
+        for order_id in finished:
+            order = self.orders.pop(order_id)
+            if self._by_client_id.get(order.client_order_id) is order:
+                del self._by_client_id[order.client_order_id]
+        self._pruned += len(finished)
+        return len(finished)
+
     def find_by_client_order_id(self, client_order_id: str) -> ManagedOrder | None:
         return self._by_client_id.get(client_order_id)
 
@@ -246,7 +301,7 @@ class ExecutionEngine(ABC):
         cycle submitted 55 good-till-cancelled orders in 55 seconds against one
         market -- roughly double the configured limit -- and nothing objected.
         """
-        cutoff = now_ms - 60_000
+        cutoff = now_ms - _RATE_WINDOW_MS
         count = 0
         for order in self.orders.values():
             submitted = order.submitted_ts
@@ -343,11 +398,30 @@ class ExecutionEngine(ABC):
         if order.book_side is None:
             is_buy = order.outcome_side is not None and order.outcome_side.value == "yes"
 
+        # The book is YES-denominated, and so is everything downstream of this
+        # walk: the fill price it reports and the account's apply_fill both speak
+        # YES. The limit has to as well. A NO buy at p is a YES sell at 1 - p, the
+        # conversion the backtester's yes_denominated_order has always made.
+        #
+        # Comparing the NO limit itself against the YES bid got both halves of the
+        # board wrong. Below fifty cents it refused marketable orders -- a NO buy
+        # at the NO ask with three thousand contracts of depth rested unfilled,
+        # which is why model_drift's exits never filled in paper and stacked. Above
+        # fifty cents it filled orders that were not marketable at all, at a price
+        # past their own limit.
+        limit_on_book = order.limit_price_cc
+        if (
+            order.book_side is None
+            and order.outcome_side is OutcomeSide.NO
+            and limit_on_book is not None
+        ):
+            limit_on_book = CC_PER_DOLLAR - limit_on_book
+
         touch = book.best_ask_cc if is_buy else book.best_bid_cc
         marketable = (
             touch is not None
-            and order.limit_price_cc is not None
-            and (order.limit_price_cc >= touch if is_buy else order.limit_price_cc <= touch)
+            and limit_on_book is not None
+            and (limit_on_book >= touch if is_buy else limit_on_book <= touch)
         )
         if not marketable or order.post_only:
             order.transition(
@@ -365,6 +439,18 @@ class ExecutionEngine(ABC):
             return
         avg_price = (
             -(-notional // filled_qc) if is_buy else notional // filled_qc
+        )
+        # Recorded in the order's own outcome's terms, as the live path records it
+        # from the exchange's no_price. The walk ran on the YES book, so a NO buy's
+        # cost is what is left of the dollar -- and with YES rounded down above,
+        # that rounds the NO cost up, against us, as a YES buy's rounding is.
+        # Recording the YES side instead put a NO order's fill and its limit on
+        # different scales, and its slippage read -4,100cc at a fill exactly on
+        # the limit.
+        fill_price_cc = (
+            CC_PER_DOLLAR - avg_price
+            if order.book_side is None and order.outcome_side is OutcomeSide.NO
+            else avg_price
         )
         # Charged on what actually filled, not on ``verdict.estimated_fees_micros``.
         # That figure is an *estimate for a decision*, priced for the quantity the
@@ -391,7 +477,7 @@ class ExecutionEngine(ABC):
         order.apply_fill(
             fill_id=f"paper-{order.order_id}",
             qty_qc=filled_qc,
-            price_cc=avg_price,
+            price_cc=fill_price_cc,
             fee_micros=fee_micros,
         )
         metrics.increment(M_ORDERS_FILLED, domain=self.market_type.value, mode="paper")
@@ -399,7 +485,7 @@ class ExecutionEngine(ABC):
             order,
             fill_id=f"paper-{order.order_id}",
             qty_qc=filled_qc,
-            price_cc=avg_price,
+            price_cc=fill_price_cc,
             fee_micros=fee_micros,
         )
 
@@ -462,6 +548,7 @@ class ExecutionEngine(ABC):
             "environment": self.environment.value,
             "live_armed": self.live_armed,
             "tracked_orders": len(self.orders),
+            "pruned_orders": self._pruned,
             "working_orders": len(working),
             "unknown_orders": sum(
                 1 for o in self.orders.values() if o.state is OrderState.UNKNOWN

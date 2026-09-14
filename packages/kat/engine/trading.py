@@ -42,6 +42,8 @@ from typing import Any
 from kat.common.enums import (
     MarketType,
     OperatingMode,
+    OrderState,
+    OutcomeSide,
     StrategyState,
     TradingEnvironment,
 )
@@ -164,6 +166,13 @@ class TradingLoop:
         #: is a loop with no idle time left for anything else on it.
         self._cycle_times: list[float] = []
         self._overruns = 0
+        #: Working quantity per market, taken once at the start of the strategy
+        #: sweep and cleared at its end. None outside a sweep, when a context is
+        #: built on its own and has to ask the execution engine directly.
+        self._resting_by_ticker: dict[str, int] | None = None
+        #: Each strategy's own working exit per market and side, taken and
+        #: cleared with the snapshot above.
+        self._resting_exits: dict[tuple[str | None, str, str], int] | None = None
         #: Set by the owning application; the loop consults it every cycle.
         self.trading_permitted: bool = False
         self.operating_mode: OperatingMode = OperatingMode.GATED_DISCOVERY
@@ -352,6 +361,13 @@ class TradingLoop:
         await self.execution.expire_stale_orders(
             now_ms=now_ms, ttl_ms=self.order_ttl_ms
         )
+        # Then forget what has finished. Every scan below is linear in the orders
+        # the engine holds, and it used to hold every order it ever placed:
+        # 103,455 by 2026-09-13, which took this cycle from 23ms to 3.6 seconds
+        # over twenty hours. A finished order is already in the database.
+        prune = getattr(self.execution, "prune_terminal_orders", None)
+        if prune is not None:
+            prune(now_ms=now_ms)
         self._mark_positions()
         self._refresh_from_execution(now_ms)
         strategies = self.active_strategies()
@@ -362,6 +378,12 @@ class TradingLoop:
         # ``None`` where the intent came from a cross-market source rather than
         # from a per-ticker strategy; see :meth:`_process`.
         intents: list[tuple[Strategy | None, OrderIntent]] = []
+        # Once per sweep rather than once per strategy per market. Every context
+        # is built before anything from this cycle is submitted, so this is
+        # exactly the number each context would have read -- and it replaces
+        # about five hundred walks of the order book with one.
+        self._resting_by_ticker = self._resting_snapshot()
+        self._resting_exits = self._resting_exit_snapshot()
         for ticker in self.market_state.tickers():
             snapshot = self.market_state.get(ticker)
             if snapshot is None:
@@ -393,6 +415,8 @@ class TradingLoop:
                     continue
                 for intent in produced or []:
                     intents.append((strategy, intent))
+        self._resting_by_ticker = None
+        self._resting_exits = None
 
         for name, produce in self.intent_sources:
             try:
@@ -668,9 +692,21 @@ class TradingLoop:
                 )
                 state.positions[ticker] = position
             position.pending_exposure_micros = micros
+        empty: list[str] = []
         for ticker, position in state.positions.items():
             if ticker not in committed:
                 position.pending_exposure_micros = 0
+                # Holding nothing and committing nothing is not a position; it is
+                # a market this loop once had an order in. The entries made above
+                # were never removed, so the dict grew with every market ever
+                # quoted -- 600 left behind after ten watchlist rotations with
+                # nothing held, and each cycle walks it several times, 107ms a
+                # cycle at 20,000 -- while a merely present entry exempted its
+                # market from the open-position cap.
+                if position.position_qc == 0 and position.exposure_micros == 0:
+                    empty.append(ticker)
+        for ticker in empty:
+            del state.positions[ticker]
 
     def _apply_paper_fill(self, intent: OrderIntent, order: Any) -> None:
         """Book a simulated fill against the local account.
@@ -690,10 +726,17 @@ class TradingLoop:
         apply = getattr(self.account_state, "apply_fill", None)
         if apply is None:
             return
+        # The account books on the YES scale, as a buy or sell of YES: a NO buy is
+        # a YES sell at what is left of the dollar. An order records its fill in
+        # its own outcome's terms -- the live convention -- so a NO fill is turned
+        # back here, the one reader that needs YES.
+        price_cc = order.avg_fill_price_cc or intent.limit_price_cc or 0
+        if price_cc and intent.book_side is None and intent.outcome_side is OutcomeSide.NO:
+            price_cc = CC_PER_DOLLAR - price_cc
         realised = apply(
             ticker=intent.ticker,
             qty_qc=order.filled_qty_qc,
-            price_cc=order.avg_fill_price_cc or intent.limit_price_cc or 0,
+            price_cc=price_cc,
             is_buy=intent.is_buy,
             fee_micros=order.fees_micros,
             event_ticker=getattr(intent, "event_ticker", "") or "",
@@ -740,6 +783,7 @@ class TradingLoop:
             position_qc=self._position_qc(snapshot.ticker),
             position_age_ms=self._position_age_ms(snapshot.ticker, now_ms),
             resting_qty_qc=self._resting_qty_qc(snapshot.ticker),
+            resting_exit_qty_qc=self._resting_exit_qty_qc(strategy.strategy_id, snapshot.ticker),
             regime=self.regimes.get(snapshot.ticker),
             research=self.research.get(snapshot.ticker, {}),
             fee_multiplier=(
@@ -774,11 +818,86 @@ class TradingLoop:
 
     def _resting_qty_qc(self, ticker: str) -> int:
         """Quantity still working in this market, across our own orders."""
+        snapshot = self._resting_by_ticker
+        if snapshot is not None:
+            return snapshot.get(ticker, 0)
         try:
             working = self.execution.working_orders(ticker=ticker)
         except Exception:
             return 0
         return sum(getattr(o, "exposure_qty_qc", 0) for o in working)
+
+    @staticmethod
+    def _is_working_exit(order: Any) -> bool:
+        """A reduce-only order that can still fill and whose cancel is not in flight.
+
+        CANCEL_REQUESTED is left out deliberately. On the live path a cancel the
+        exchange answers with 404 leaves an order there indefinitely, and counting
+        it would hold an exit back until restart. Placing another exit past it
+        cannot over-reduce, because reduce-only travels with the order and the
+        exchange enforces it; in paper a cancel completes within the call.
+        """
+        return (
+            bool(getattr(order, "reduce_only", False))
+            and bool(getattr(order, "is_working", False))
+            and getattr(order, "state", None) is not OrderState.CANCEL_REQUESTED
+        )
+
+    def _resting_exit_snapshot(self) -> dict[tuple[str | None, str, str], int] | None:
+        """Working exit quantity by (strategy, market, side), or None if unavailable."""
+        try:
+            working = self.execution.working_orders()
+        except Exception:
+            return None
+        totals: dict[tuple[str | None, str, str], int] = {}
+        for order in working:
+            side = getattr(getattr(order, "outcome_side", None), "value", None)
+            ticker = getattr(order, "ticker", None)
+            if side is None or ticker is None or not self._is_working_exit(order):
+                continue
+            key = (getattr(order, "strategy_id", None), ticker, side)
+            totals[key] = totals.get(key, 0) + getattr(order, "exposure_qty_qc", 0)
+        return totals
+
+    def _resting_exit_qty_qc(self, strategy_id: str | None, ticker: str) -> int:
+        """This strategy's working exit on the side that closes the position."""
+        position_qc = self._position_qc(ticker)
+        if position_qc == 0:
+            return 0
+        closing_side = "no" if position_qc > 0 else "yes"
+        snapshot = self._resting_exits
+        if snapshot is not None:
+            return snapshot.get((strategy_id, ticker, closing_side), 0)
+        try:
+            working = self.execution.working_orders(ticker=ticker)
+        except Exception:
+            return 0
+        return sum(
+            getattr(o, "exposure_qty_qc", 0)
+            for o in working
+            if self._is_working_exit(o)
+            and getattr(o, "strategy_id", None) == strategy_id
+            and getattr(getattr(o, "outcome_side", None), "value", None) == closing_side
+        )
+
+    def _resting_snapshot(self) -> dict[str, int] | None:
+        """Working quantity for every market at once, or None if unavailable.
+
+        None rather than an empty map when the engine cannot be asked, so the
+        per-market path runs instead and a failure reads as it always has --
+        rather than as every market being free of working orders.
+        """
+        try:
+            working = self.execution.working_orders()
+        except Exception:
+            return None
+        totals: dict[str, int] = {}
+        for order in working:
+            ticker = getattr(order, "ticker", None)
+            if ticker is None:
+                continue
+            totals[ticker] = totals.get(ticker, 0) + getattr(order, "exposure_qty_qc", 0)
+        return totals
 
     def _position_age_ms(self, ticker: str, now_ms: int) -> int | None:
         """How long the position in ``ticker`` has been open, or None."""

@@ -84,6 +84,7 @@ _SKIP_EDGE_TOO_SMALL = "drift_below_threshold"
 _SKIP_PRICE_BAND = "price_outside_band"
 _SKIP_NEAR_BOUND = "too_close_to_a_bound_for_the_sign_to_mean_anything"
 _SKIP_HOLDING = "holding_while_the_view_stands"
+_SKIP_EXIT_WORKING = "exit_already_working"
 
 #: Targets this strategy can read: a forward move over a horizon, with the
 #: threshold that defines "a move" written into the name.
@@ -218,9 +219,24 @@ class ModelDriftStrategy(TradingStrategy):
         # the model's drift turns against what is held, the reason for holding is
         # gone, and waiting for a fresh entry-quality edge in the other direction
         # is waiting for a much rarer event than the one that already happened.
-        exit_intent = self._exit_if_reversed(ctx, drift_cc, quote)
+        warranted, exit_intent = self._exit_if_reversed(ctx, drift_cc, quote)
         if exit_intent is not None:
             return self.emit([exit_intent])
+        if warranted:
+            # Everything that needs exiting already has an exit working.
+            #
+            # Nothing used to check, so while an exit rested unfilled the next
+            # cycle placed another on top of it: 103,680 reduce-only orders
+            # against four markets in 20.5 hours, 24 to 27 a minute each where a
+            # 60-second TTL allows one. Every accepted order stayed in memory,
+            # and that is what took the trading cycle to 3.6 seconds.
+            #
+            # The first fix read the market-wide working quantity, and review
+            # reproduced what that costs: another strategy's staggered orders
+            # held a fillable exit back for 540 cycles. This counts only this
+            # strategy's own exit, and places one only for the part of the
+            # position that exit does not already cover.
+            return self.skip(_SKIP_EXIT_WORKING)
 
         # Both sides against their own executable price, exactly as the
         # mispricing strategy does: the NO edge is (1 - fair) - no_ask.
@@ -295,10 +311,13 @@ class ModelDriftStrategy(TradingStrategy):
 
     def _exit_if_reversed(
         self, ctx: StrategyContext, drift_cc: int, quote: object
-    ) -> OrderIntent | None:
+    ) -> tuple[bool, OrderIntent | None]:
         """Flatten a position the model no longer supports.
 
-        Returns ``None`` when there is nothing held or the view still stands.
+        Returns ``(warranted, intent)``. Warranted without an intent means an exit
+        is called for but this strategy's working exit already covers the
+        position. Neither means nothing is held, the view still stands, or there
+        is no price to exit at -- and the caller carries on to its entry test.
 
         Not subject to the cost floor that governs entries. That floor asks
         whether an edge is worth paying to capture; this is asking whether to
@@ -308,7 +327,7 @@ class ModelDriftStrategy(TradingStrategy):
         """
         position_qc = ctx.position_qc
         if position_qc == 0:
-            return None
+            return False, None
 
         holding_yes = position_qc > 0
         drift_up = drift_cc > 0
@@ -326,17 +345,21 @@ class ModelDriftStrategy(TradingStrategy):
         )
 
         if not reversed_view and not expired:
-            return None
+            return False, None
+
+        remaining_qc = abs(position_qc) - max(0, ctx.resting_exit_qty_qc)
+        if remaining_qc <= 0:
+            return True, None
 
         side = OutcomeSide.NO if holding_yes else OutcomeSide.YES
         price_cc = quote.no_ask_cc if holding_yes else quote.yes_ask_cc  # type: ignore[attr-defined]
         if not price_cc:
-            return None
+            return False, None
 
         intent = self.event_intent(
             ctx,
             side=side,
-            qty_qc=abs(position_qc),
+            qty_qc=remaining_qc,
             limit_price_cc=price_cc,
             fair_value_cc=clamp_price_cc(quote.mid_cc + drift_cc),  # type: ignore[attr-defined]
             confidence=min(0.99, abs(drift_cc) / max(1, abs(drift_cc))),
@@ -344,7 +367,7 @@ class ModelDriftStrategy(TradingStrategy):
                 side=side,
                 cost_cc=price_cc,
                 fair_value_cc=clamp_price_cc(quote.mid_cc + drift_cc),  # type: ignore[attr-defined]
-                qty_qc=abs(position_qc),
+                qty_qc=remaining_qc,
                 schedule=fee_schedule_for(ctx),
             ),
             reason="model_drift_exit",
@@ -352,13 +375,14 @@ class ModelDriftStrategy(TradingStrategy):
                 "model_probability": round(ctx.model_probability or 0.0, 6),
                 "model_target": ctx.model_target,
                 "held_qc": position_qc,
+                "working_exit_qc": ctx.resting_exit_qty_qc,
                 "drift_cc": drift_cc,
                 "held_ms": age_ms,
                 "closed_because": "reversed" if reversed_view else "horizon_expired",
             },
         )
         intent.reduce_only = True
-        return intent
+        return True, intent
 
     @staticmethod
     def _round_trip_cc(mid_cc: int, spread_cc: int) -> int:

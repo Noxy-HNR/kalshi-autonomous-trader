@@ -470,7 +470,15 @@ class EventRiskEngine:
                 )
 
             # 3g. Open-position count.
-            if intent.ticker not in state.positions:
+            #
+            # Whether this order would open a position, not whether the market has
+            # an entry in the dict. Entries exist for markets with only a resting
+            # order, and used to outlive it; the membership test then exempted any
+            # market ever quoted from this cap for good. Reproduced: an account at
+            # the cap rejected a new market with MAX_OPEN_POSITIONS and approved
+            # the same order on a market that had once held a quote.
+            held = state.positions.get(intent.ticker)
+            if held is None or held.position_qc == 0:
                 open_count = sum(1 for p in state.positions.values() if p.position_qc != 0)
                 ok = open_count < self.settings.max_open_positions
                 checks.append(

@@ -191,7 +191,11 @@ class TestTheLoopCarriesThemToTheAccountState:
         o.filled_qty_qc = o.requested_qty_qc
         loop._refresh_from_execution(NOW_MS)
 
-        assert loop.account_state.positions[TICKER].pending_exposure_micros == 0
+        # The account held nothing in this market but the order, so with the
+        # order gone there is nothing left to carry: the entry goes too. Keeping
+        # it grew the dict with every market ever quoted and exempted the market
+        # from the open-position cap.
+        assert TICKER not in loop.account_state.positions
 
     def test_the_rate_limit_now_actually_fires(self):
         """End to end: the limit exists to stop this, and now it does."""

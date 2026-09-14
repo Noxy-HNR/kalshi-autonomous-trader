@@ -186,10 +186,20 @@ class StrategyContext:
     #: How long the current position has been held, or None when flat or
     #: unknown. A forecast with a horizon is only actionable for that horizon.
     position_age_ms: int | None = None
-    #: Quantity this strategy already has resting in this market. A quoting
-    #: strategy that cannot see its own working orders re-quotes every cycle and
-    #: stacks hundreds of them into one position instead of cycling.
+    #: Quantity resting in this market across every strategy's working orders,
+    #: not this strategy's alone. A quoting strategy that cannot see what is
+    #: already working re-quotes every cycle and stacks hundreds of orders into
+    #: one position instead of cycling.
     resting_qty_qc: int = 0
+    #: This strategy's own working exit: reduce-only quantity on the side that
+    #: closes the current position, leaving out any order whose cancel is in
+    #: flight. An exit subtracts this from the position before placing another.
+    #:
+    #: Market-wide quantity is the wrong test for that, and review reproduced the
+    #: cost through the real cycle: another strategy's staggered orders kept it
+    #: above zero and held a fillable exit back for 540 cycles, and on the live
+    #: path one order stuck in CANCEL_REQUESTED would have held it until restart.
+    resting_exit_qty_qc: int = 0
     #: The venue's own fee coefficients, when this market is on Polymarket US.
     #: The same quadratic form as a Kalshi event contract with a different taker
     #: coefficient and a *negative* maker one -- the exchange pays a resting
