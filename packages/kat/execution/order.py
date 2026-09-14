@@ -279,11 +279,13 @@ class ManagedOrder:
             return None
         # Paying more than the limit on a buy, or receiving less on a sell, is
         # positive slippage.
-        buying = (
-            self.book_side is BookSide.BID
-            if self.book_side is not None
-            else self.outcome_side is OutcomeSide.YES
-        )
+        #
+        # An event order is always a buy. This platform only ever buys an
+        # outcome -- it exits YES by buying NO -- and both prices here are in that
+        # outcome's own terms. Reading a NO buy as a sell flipped the sign of every
+        # NO order's slippage, and with paper recording NO fills in YES terms on
+        # top of it, a NO buy that filled exactly at its limit reported -4,100cc.
+        buying = self.book_side is BookSide.BID if self.book_side is not None else True
         if buying:
             return self.avg_fill_price_cc - self.limit_price_cc
         return self.limit_price_cc - self.avg_fill_price_cc
