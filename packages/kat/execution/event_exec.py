@@ -132,6 +132,11 @@ class EventExecutionEngine(ExecutionEngine):
                 "execution.unknown_resolved_absent",
                 order_id=order.order_id, client_order_id=order.client_order_id,
             )
+            # Persisted, because nothing else on this path did: the order's row
+            # kept whatever state was last written -- UNKNOWN, typically -- after
+            # the exchange had told us its real fate, so the audit trail and memory
+            # disagreed from then on.
+            self._persist(order)
             return order.state
 
         order.exchange_order_id = match.order_id
@@ -150,4 +155,5 @@ class EventExecutionEngine(ExecutionEngine):
             "execution.unknown_resolved",
             order_id=order.order_id, exchange_order_id=match.order_id, state=order.state.value,
         )
+        self._persist(order)
         return order.state
